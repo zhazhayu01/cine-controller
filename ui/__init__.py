@@ -1,9 +1,12 @@
 """ui 包：View3D Sidebar Panel。"""
+import bpy
+
+from . import panel
 
 
 def register():
-    pass
+    panel.register()
 
 
 def unregister():
-    pass
+    panel.unregister()
