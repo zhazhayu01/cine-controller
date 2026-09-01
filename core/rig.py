@@ -82,12 +82,32 @@ def _get_rig_collection(context):
     """获取或创建存放 Cine Rig Helper 的独立 Collection。
 
     集中管理：用户可在 Outliner 一眼看到 rig 结构，并可整体隐藏/禁用。
+    默认在视口隐藏 + 渲染禁用 + 从 View Layer 排除（helper 是纯逻辑节点，不参与显示/渲染）。
+    实测：exclude 不影响 driver/constraint 求值（camera 不在该集合内）。
     """
     coll = bpy.data.collections.get("Cine Rig")
     if coll is None:
         coll = bpy.data.collections.new("Cine Rig")
         context.scene.collection.children.link(coll)
+
+    # 默认隐藏：视口不可见 + 渲染禁用
+    coll.hide_viewport = True
+    coll.hide_render = True
+
+    # Exclude from View Layer（作用在 layer_collection 上）
+    for lc in _iter_layer_collections(context.view_layer.layer_collection):
+        if lc.name == "Cine Rig":
+            lc.exclude = True
+            break
+
     return coll
+
+
+def _iter_layer_collections(layer_collection):
+    """递归遍历 view layer 的 layer_collection 树。"""
+    yield layer_collection
+    for child in layer_collection.children:
+        yield from _iter_layer_collections(child)
 
 
 def _new_empty(context, name: str, parent=None):
