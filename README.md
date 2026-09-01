@@ -33,8 +33,9 @@ Camera(Baked, Frame N)
 | Origin / Distance / Horizontal / Vertical | ✅ 已实现（Driver 绝对驱动） |
 | Aim Target / Aim Influence | ✅ 已实现（Track To 约束） |
 | Focus Target | ✅ 已实现（DOF，与 Transform 解耦） |
+| Position Offset | ✅ 已实现（沿 Camera Right/Up/Forward） |
+| Pan / Tilt / Roll | ✅ 已实现（绕本地轴，不改变位置） |
 | Bake to Keyframes | ✅ 已实现（采样 evaluated matrix） |
-| Position Offset / Pan / Tilt / Roll | ⬜ 未实现（规范要求里程碑 1 通过后开发） |
 
 ## 安装
 
@@ -78,20 +79,25 @@ Viewport、Render、Bake 必须读取同一个最终 evaluated Camera Transform�
 ROOT   (Empty)  World Position = Origin（Copy Location，world→world）
   └─ YAW    (Empty)  Local rot.z = horizontal        [Driver]
       └─ PITCH  (Empty)  Local rot.x = vertical      [Driver]
-          └─ BASE   (Empty)  Local rot.x = +90°      [固定，把 -Z forward 转到水平]
-              └─ DIST   (Empty)  Local loc.z = distance  [Driver]
-                  └─ AIM    (Empty)  Track To → Aim Target  [约束]
-                      └─ CAMERA  (真实 Camera 对象)
+          └─ DIST   (Empty)  Local loc.y = -distance  [Driver，位置在 BASE 之前]
+              └─ BASE   (Empty)  Local rot = 反解的朝向基准   [Enable 时反解]
+                  └─ OFFSET (Empty)  Local loc = (offset.x, offset.y, -offset.z)  [Driver x3]
+                      └─ AIM    (Empty)  Track To → Aim Target  [约束]
+                          └─ LOCAL_ROT (Empty)  Local euler = (tilt, pan, -roll)  [Driver x3]
+                              └─ CAMERA  (真实 Camera 对象，local = identity)
 ```
 
 Camera 相对 Origin 的位置（与 rig 求值严格一致）：
 
 ```text
-R_z(h) · R_x(v) · R_x(90°) · (0,0,d)
+R_z(h) · R_x(v) · (0, -d, 0)
 = ( d·sin h·cos v,  -d·cos h·cos v,  -d·sin v )
 ```
 
-vertical = 0 → 水平环绕；vertical = +90° → 正上方俯视。
+vertical = 0 → 水平环绕；vertical = +90° → 正下方（俯视上方）。
+
+轴约定（§58）：BASE 之后的本地轴 = camera 朝向轴 `+X=Right, +Y=Up, -Z=Forward`。
+OFFSET 直接沿这些轴移动；LOCAL_ROT 中 tilt=绕+X、pan=绕+Y、roll=绕-Z（Forward）。
 
 ### 三个独立系统域
 
@@ -130,6 +136,7 @@ CineController/
 │   ├── save_reload_test.py    # 真实 save+reload 逐帧矩阵一致
 │   ├── bake_test.py           # Live ≈ Baked 每帧
 │   ├── viewport_render_test.py# Viewport ≈ Render + scene.camera 切换
+│   ├── offset_pan_test.py     # Offset 方向 + pan/tilt/roll 绕本地轴
 │   ├── run_all.sh             # 一键跑全部
 │   └── scenes/                # 测试场景（camera_consistency.blend 等）
 └── docs/                      # 稳定性与统一求值规范
@@ -145,7 +152,7 @@ bash tests/run_all.sh
 blender -b -P tests/run_tests.py
 ```
 
-当前测试结果：**4 套 18 项全部通过，矩阵误差 0**。
+当前测试结果：**5 套 27 项全部通过，矩阵误差 0**。
 
 | 测试 | 覆盖 | 结果 |
 |------|------|------|
@@ -153,6 +160,7 @@ blender -b -P tests/run_tests.py
 | save_reload_test | 真实 .blend save + reload 逐帧矩阵一致 | 2/2 |
 | bake_test | Live ≈ Baked 每帧 + Quaternion | 3/3 |
 | viewport_render_test | Viewport ≈ Render + scene.camera 切换 | 2/2 |
+| offset_pan_test | Offset 沿 Right/Up/Forward + pan/tilt/roll 绕本地轴 | 9/9 |
 
 > 已知 headless 限制：后台模式下直接改 Python 属性不会自动触发 Driver 重求值
 > （Blender issue #91140），测试里统一走 `rig.force_update()`（内部 `update_tag()`）。

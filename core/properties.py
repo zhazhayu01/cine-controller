@@ -97,6 +97,24 @@ class CineControllerParams(bpy.types.PropertyGroup):
         update=_aim_update,
         description="Aim 混合权重 [0,1]，由 Blender Track To 约束处理",
     )
+    pan: bpy.props.FloatProperty(
+        name="Pan",
+        default=0.0,
+        subtype='ANGLE',
+        description="绕 Camera Up（本地 +Y）的水平摇摄角（弧度）",
+    )
+    tilt: bpy.props.FloatProperty(
+        name="Tilt",
+        default=0.0,
+        subtype='ANGLE',
+        description="绕 Camera Right（本地 +X）的俯仰角（弧度）",
+    )
+    roll: bpy.props.FloatProperty(
+        name="Roll",
+        default=0.0,
+        subtype='ANGLE',
+        description="绕 Camera Forward（本地 -Z）的翻滚角（弧度）",
+    )
 
     # ---- Optical System ----
     focus_target: bpy.props.PointerProperty(
@@ -112,7 +130,9 @@ class CineControllerParams(bpy.types.PropertyGroup):
     rig_pitch: bpy.props.PointerProperty(type=bpy.types.Object)
     rig_base: bpy.props.PointerProperty(type=bpy.types.Object)
     rig_dist: bpy.props.PointerProperty(type=bpy.types.Object)
+    rig_offset: bpy.props.PointerProperty(type=bpy.types.Object)
     rig_aim: bpy.props.PointerProperty(type=bpy.types.Object)
+    rig_local_rot: bpy.props.PointerProperty(type=bpy.types.Object)
 
 
 def register():

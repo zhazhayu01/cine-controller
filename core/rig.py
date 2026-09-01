@@ -3,57 +3,48 @@
 规范关键点：
     §9   依赖 Parent Hierarchy + Constraint + Driver（Dependency Graph），
          禁止 frame_change_post / depsgraph_update_post 持续写回 Camera。
-    §12  Local / World Space 显式定义。
+    §12  Local / World Space 显式定义；RADIUS 在 BASE 之前（位置与朝向解耦）。
     §13  Camera World Matrix 是最终真相。
     §22/23 关系用 PointerProperty，不靠 Name String 重查。
     §33  Constraint 创建显式指定 owner_space / target_space / track_axis / up_axis / influence。
     §34  Driver 绝对驱动（= horizontal，而非 += horizontal）。
     §35  简单 Driver Variable + Expression，不用自定义 Driver Namespace。
 
-Rig 层级：
+Rig 层级（遵循规范 §12 建议顺序）：
     ROOT   (Empty)  World Position = Origin（Copy Location，world→world）
       └─ YAW    (Empty)  Local rot.z = horizontal        [Driver]
           └─ PITCH  (Empty)  Local rot.x = vertical      [Driver]
-              └─ BASE   (Empty)  Local rot.x = +90°      [固定，把 camera -Z forward 转到水平]
-                  └─ DIST   (Empty)  Local loc.z = distance  [Driver]
-                      └─ AIM    (Empty)  Track To → Aim Target, influence [约束]
-                          └─ CAMERA  (真实 Camera 对象，local transform 反解补偿)
+              └─ DIST   (Empty)  Local loc.y = -distance  [Driver，位置，在 BASE 之前]
+                  └─ BASE   (Empty)  Local rot = 反解的朝向基准   [Enable 时反解]
+                      └─ OFFSET (Empty)  Local loc = cine_offset→blender_local  [Driver x3]
+                          └─ AIM    (Empty)  Track To → Aim Target, influence [约束]
+                              └─ LOCAL_ROT (Empty)  Local euler = (tilt, pan, -roll)  [Driver x3]
+                                  └─ CAMERA  (真实 Camera 对象，local = identity)
+
+轴约定（§58，经实测验证）：
+    BASE 之后的本地轴 = camera 朝向轴：+X=Right, +Y=Up, -Z=Forward。
+    因此 OFFSET.location = (offset.x, offset.y, -offset.z)。
+    LOCAL_ROT：tilt=绕 +X(Right), pan=绕 +Y(Up), roll=绕 Forward(-Z) = -euler.z。
+
+位置公式（与 utils.math_utils 一致）：
+    R_z(h)·R_x(v)·(0, -d, 0) = (d·sin h·cos v, -d·cos h·cos v, -d·sin v)
 """
 import bpy
 from math import pi
-from mathutils import Matrix
+from mathutils import Matrix, Quaternion
 
 from ..utils import math_utils as mu
 
-# BASE 固定旋转：+90° 绕 X，使「distance 沿 +Z」映射为「水平轨道」，相机 forward(-Z) 保持水平看回原点。
-BASE_ANGLE = pi / 2.0
 
-# Helper 命名前缀（仅作显示用；身份识别靠 PointerProperty，不靠名字）
-RIG_PREFIX = "CC_"
+def compose_orbit_rotation(horizontal: float, vertical: float) -> Matrix:
+    """YAW·PITCH 的累计旋转 R_orbit = R_z(h)·R_x(v)。
 
-
-def compose_rig_rotation(horizontal: float, vertical: float) -> Matrix:
-    """Rig 祖先链的累计旋转矩阵 R_rig = R_z(h) · R_x(v) · R_x(90°)。
-
-    与 Blender 中 ROOT→YAW→PITCH→BASE 的父子链求值结果一致。
-    用于 Enable 时反解 Camera 本地旋转以保持位姿。
+    这是「朝向基准」之前的轨道旋转，用于反解 BASE。
     """
     return (
         Matrix.Rotation(horizontal, 4, 'Z')
         @ Matrix.Rotation(vertical, 4, 'X')
-        @ Matrix.Rotation(BASE_ANGLE, 4, 'X')
     )
-
-
-def compose_aim_world_matrix(origin_world, distance, horizontal, vertical) -> Matrix:
-    """AIM 节点（相机父级）的世界矩阵（不含 Track To 约束效果，即 aim_influence=0 时）。
-
-    用于反解 Camera 本地 transform。
-    """
-    t_origin = Matrix.Translation(origin_world)
-    r_rig = compose_rig_rotation(horizontal, vertical)
-    t_dist = Matrix.Translation((0.0, 0.0, distance))
-    return t_origin @ r_rig @ t_dist
 
 
 def read_evaluated_camera_matrix(context, camera_obj) -> Matrix:
@@ -79,7 +70,8 @@ def force_update(context, camera_obj):
     camera_obj.update_tag()
     params = camera_obj.cine
     for helper in (params.rig_root, params.rig_yaw, params.rig_pitch,
-                   params.rig_base, params.rig_dist, params.rig_aim):
+                   params.rig_dist, params.rig_base, params.rig_offset,
+                   params.rig_aim, params.rig_local_rot):
         if helper is not None:
             helper.update_tag()
     context.view_layer.update()
@@ -88,7 +80,7 @@ def force_update(context, camera_obj):
 
 def _new_empty(context, name: str, parent=None):
     """创建一个 Empty Helper 并挂到场景集合。"""
-    empty = bpy.data.objects.new(RIG_PREFIX + name, None)
+    empty = bpy.data.objects.new("CC_" + name, None)
     empty.empty_display_type = 'PLAIN_AXES'
     empty.empty_display_size = 0.25
     context.scene.collection.objects.link(empty)
@@ -116,10 +108,17 @@ def _add_driver(obj, data_path: str, index: int, target_id, source_path: str, ex
     return driver
 
 
-def _solve_camera_local(M0: Matrix, origin_world, distance, horizontal, vertical) -> Matrix:
-    """反解 Camera 本地矩阵，使最终世界矩阵 = M0（位姿保持）。"""
-    aim_world = compose_aim_world_matrix(origin_world, distance, horizontal, vertical)
-    return aim_world.inverted() @ M0
+def _solve_base_rotation(M0: Matrix, horizontal: float, vertical: float) -> Quaternion:
+    """反解 BASE 节点的旋转，使 camera 保持 Enable 时的世界朝向。
+
+    camera 世界朝向 = R_orbit(h,v) · R_base（OFFSET/AIM/LOCAL_ROT 均为 identity）。
+    要等于 M0 的旋转 R0，则 R_base = R_orbit⁻¹ · R0。
+
+    这样 offset 的轴（BASE 之后）= camera 实际朝向轴，pan/tilt/roll 保持 0。
+    """
+    r_orbit = compose_orbit_rotation(horizontal, vertical).to_quaternion()
+    r0 = M0.to_quaternion()
+    return r_orbit.inverted() @ r0
 
 
 def build_rig(context, camera_obj, origin_obj) -> dict:
@@ -132,26 +131,37 @@ def build_rig(context, camera_obj, origin_obj) -> dict:
     # 1. 记录修改前 Camera evaluated 世界矩阵
     M0 = read_evaluated_camera_matrix(context, camera_obj)
 
-    # 2. 反解 orbit 参数
+    # 2. 反解 orbit 参数（位置）+ BASE 朝向
     origin_world = origin_obj.matrix_world.to_translation()
     d, h, v = solve_orbit_from_pose(origin_world, M0.to_translation())
+    base_quat = _solve_base_rotation(M0, h, v)
 
     params = camera_obj.cine
     params.distance = d
     params.horizontal = h
     params.vertical = v
     params.origin = origin_obj
+    # offset 归零（位置已由 orbit 反解）；pan/tilt/roll 归零（朝向已由 BASE 反解）
+    params.offset = (0.0, 0.0, 0.0)
+    params.pan = 0.0
+    params.tilt = 0.0
+    params.roll = 0.0
 
-    # 3. 构建 Helper 层级
+    # 3. 构建 Helper 层级（DIST 在 BASE 之前）
     root = _new_empty(context, "ROOT", parent=None)
     yaw = _new_empty(context, "YAW", parent=root)
     pitch = _new_empty(context, "PITCH", parent=yaw)
-    base = _new_empty(context, "BASE", parent=pitch)
-    dist = _new_empty(context, "DIST", parent=base)
-    aim = _new_empty(context, "AIM", parent=dist)
+    dist = _new_empty(context, "DIST", parent=pitch)
+    base = _new_empty(context, "BASE", parent=dist)
+    offset = _new_empty(context, "OFFSET", parent=base)
+    aim = _new_empty(context, "AIM", parent=offset)
+    local_rot = _new_empty(context, "LOCAL_ROT", parent=aim)
 
-    # BASE 固定旋转 +90°（绕 X）
-    base.rotation_euler = (BASE_ANGLE, 0.0, 0.0)
+    # BASE 反解的朝向基准（用 QUATERNION 存储，避免 euler↔quat 精度损失）
+    base.rotation_mode = 'QUATERNION'
+    base.rotation_quaternion = base_quat
+    # LOCAL_ROT 显式 XYZ 顺序（§33 不依赖默认值）
+    local_rot.rotation_mode = 'XYZ'
 
     # 4. ROOT 跟随 Origin 世界位置（Copy Location，显式 world→world）
     con = root.constraints.new('COPY_LOCATION')
@@ -167,21 +177,30 @@ def build_rig(context, camera_obj, origin_obj) -> dict:
     _add_driver(yaw, "rotation_euler", 2, camera_obj, "cine.horizontal", "v")
     # PITCH.rotation_euler.x = vertical
     _add_driver(pitch, "rotation_euler", 0, camera_obj, "cine.vertical", "v")
-    # DIST.location.z = distance
-    _add_driver(dist, "location", 2, camera_obj, "cine.distance", "v")
+    # DIST.location.y = -distance（沿本地 -Y 后退 = 轨道半径）
+    _add_driver(dist, "location", 1, camera_obj, "cine.distance", "-v")
+    # OFFSET.location = (offset.x, offset.y, -offset.z)（Right/Up/Forward → 本地轴）
+    _add_driver(offset, "location", 0, camera_obj, "cine.offset[0]", "v")
+    _add_driver(offset, "location", 1, camera_obj, "cine.offset[1]", "v")
+    _add_driver(offset, "location", 2, camera_obj, "cine.offset[2]", "-v")
+    # LOCAL_ROT.rotation_euler = (tilt, pan, -roll)（roll 绕 Forward=-Z）
+    _add_driver(local_rot, "rotation_euler", 0, camera_obj, "cine.tilt", "v")
+    _add_driver(local_rot, "rotation_euler", 1, camera_obj, "cine.pan", "v")
+    _add_driver(local_rot, "rotation_euler", 2, camera_obj, "cine.roll", "-v")
 
-    # 6. 反解 Camera 本地 transform（保持位姿）
-    camera_local = _solve_camera_local(M0, origin_world, d, h, v)
-    camera_obj.parent = aim
-    camera_obj.matrix_local = camera_local
+    # 6. Camera 本地 transform = identity（朝向差异已进 BASE，位置已进 orbit）
+    camera_obj.parent = local_rot
+    camera_obj.matrix_local = Matrix.Identity(4)
 
     # 7. 记录 Helper 引用到参数（PointerProperty，不靠名字）
     params.rig_root = root
     params.rig_yaw = yaw
     params.rig_pitch = pitch
-    params.rig_base = base
     params.rig_dist = dist
+    params.rig_base = base
+    params.rig_offset = offset
     params.rig_aim = aim
+    params.rig_local_rot = local_rot
     params.enabled = True
 
     # 8. 更新 Depsgraph 后读取结果
@@ -203,14 +222,14 @@ def _apply_aim(context, camera_obj):
 
     # 清除旧的 Cine Aim 约束（用名字前缀识别自己的约束）
     for c in aim.constraints:
-        if c.type == 'TRACK_TO' and c.name.startswith(RIG_PREFIX + "AIM"):
+        if c.type == 'TRACK_TO' and c.name.startswith("CC_AIM"):
             aim.constraints.remove(c)
 
     if params.aim_target is None:
         return
 
     con = aim.constraints.new('TRACK_TO')
-    con.name = RIG_PREFIX + "AIM_TRACK"
+    con.name = "CC_AIM_TRACK"
     con.target = params.aim_target
     con.track_axis = 'TRACK_NEGATIVE_Z'
     con.up_axis = 'UP_Y'
@@ -227,7 +246,8 @@ def remove_rig(context, camera_obj):
     params = camera_obj.cine
     helpers = [
         params.rig_root, params.rig_yaw, params.rig_pitch,
-        params.rig_base, params.rig_dist, params.rig_aim,
+        params.rig_dist, params.rig_base, params.rig_offset,
+        params.rig_aim, params.rig_local_rot,
     ]
 
     # 1. 记录位姿
@@ -238,7 +258,7 @@ def remove_rig(context, camera_obj):
         camera_obj.parent = None
         camera_obj.matrix_world = M0
 
-    # 3. 删除 Helper（子级 Empty 随父级删除前需先解除相机 parent 已完成）
+    # 3. 删除 Helper
     for helper in helpers:
         if helper is not None and helper.name in bpy.data.objects:
             bpy.data.objects.remove(helper, do_unlink=True)
@@ -247,9 +267,11 @@ def remove_rig(context, camera_obj):
     params.rig_root = None
     params.rig_yaw = None
     params.rig_pitch = None
-    params.rig_base = None
     params.rig_dist = None
+    params.rig_base = None
+    params.rig_offset = None
     params.rig_aim = None
+    params.rig_local_rot = None
     params.enabled = False
 
     context.evaluated_depsgraph_get().update()

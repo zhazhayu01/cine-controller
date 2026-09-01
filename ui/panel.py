@@ -45,6 +45,9 @@ class CINE_PT_panel(bpy.types.Panel):
         box.label(text="Orientation", icon='ORIENTATION_VIEW')
         box.prop(params, "aim_target")
         box.prop(params, "aim_influence")
+        box.prop(params, "pan")
+        box.prop(params, "tilt")
+        box.prop(params, "roll")
 
         box = layout.box()
         box.label(text="Optical", icon='CAMERA_DATA')
