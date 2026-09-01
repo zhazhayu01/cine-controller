@@ -21,6 +21,9 @@ class CINE_PT_panel(bpy.types.Panel):
         camera = context.active_object
         params = camera.cine
 
+        # Origin 始终显示（启用前必须先设置 Origin）
+        layout.prop(params, "origin", text="Origin")
+
         # Enable / Disable
         if params.enabled:
             layout.operator("cine.disable_controller", text="Disable Controller", icon='CANCEL')
@@ -33,7 +36,6 @@ class CINE_PT_panel(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="Transform", icon='EMPTY_ARROWS')
-        box.prop(params, "origin")
         box.prop(params, "distance")
         box.prop(params, "horizontal")
         box.prop(params, "vertical")
