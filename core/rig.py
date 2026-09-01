@@ -78,12 +78,34 @@ def force_update(context, camera_obj):
     context.evaluated_depsgraph_get().update()
 
 
+def _get_rig_collection(context):
+    """获取或创建存放 Cine Rig Helper 的独立 Collection。
+
+    集中管理：用户可在 Outliner 一眼看到 rig 结构，并可整体隐藏/禁用。
+    """
+    coll = bpy.data.collections.get("Cine Rig")
+    if coll is None:
+        coll = bpy.data.collections.new("Cine Rig")
+        context.scene.collection.children.link(coll)
+    return coll
+
+
 def _new_empty(context, name: str, parent=None):
-    """创建一个 Empty Helper 并挂到场景集合。"""
+    """创建一个 Empty Helper，挂到 Cine Rig Collection，并锁定防误操作。
+
+    锁定只阻止用户在视口误选 / 手动误拖变换；driver 与 constraint 的求值不受影响。
+    """
     empty = bpy.data.objects.new("CC_" + name, None)
     empty.empty_display_type = 'PLAIN_AXES'
     empty.empty_display_size = 0.25
-    context.scene.collection.objects.link(empty)
+
+    # 锁定：视口不可选 + 锁定 location/rotation/scale（防误操作）
+    empty.hide_select = True
+    empty.lock_location = (True, True, True)
+    empty.lock_rotation = (True, True, True)
+    empty.lock_scale = (True, True, True)
+
+    _get_rig_collection(context).objects.link(empty)
     if parent is not None:
         empty.parent = parent
     return empty
@@ -262,6 +284,11 @@ def remove_rig(context, camera_obj):
     for helper in helpers:
         if helper is not None and helper.name in bpy.data.objects:
             bpy.data.objects.remove(helper, do_unlink=True)
+
+    # 3b. 若 Cine Rig Collection 已空，清理之（只删自己的空集合）
+    coll = bpy.data.collections.get("Cine Rig")
+    if coll is not None and len(coll.objects) == 0 and len(coll.children) == 0:
+        bpy.data.collections.remove(coll)
 
     # 4. 清空引用与状态
     params.rig_root = None
