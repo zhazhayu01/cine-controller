@@ -16,7 +16,13 @@ Cine Controller 逻辑轴：
     Offset Y = Camera Up
     Offset Z = Camera Forward
 """
-from mathutils import Vector
+from math import pi
+from mathutils import Vector, Quaternion
+
+
+def default_camera_rotation() -> Quaternion:
+    """内部绕 X 校正 +90°：本地 -Z 前向映射到世界 +Y，本地 +Y 上向映射到世界 +Z。"""
+    return Quaternion((1.0, 0.0, 0.0), pi / 2)
 
 
 def cine_offset_to_blender_local(offset: Vector) -> Vector:

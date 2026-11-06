@@ -10,10 +10,10 @@
 bl_info = {
     "name": "Cine Controller",
     "author": "zhazhayu001",
-    "version": (0, 1, 0),
+    "version": (0, 6, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Cine",
-    "description": "电影级摄影机控制器：稳定的 Origin/Aim/Focus 绑定与一致性求值",
+    "description": "电影级摄影机控制器：空间原点、瞄准和对焦控制与一致性求值",
     "category": "Camera",
 }
 
@@ -24,6 +24,7 @@ import sys
 _MODULES = (
     "utils",
     "core",
+    "preferences",
     "operators",
     "ui",
 )
@@ -31,14 +32,16 @@ _MODULES = (
 _submodules = {
     "utils": ("math_utils", "axis_utils"),
     "core": (
-        "transform_system",
-        "orientation_system",
+        "driver_graph",
+        "controller_shape",
+        "properties",
         "optical_system",
+        "dolly_zoom",
         "rig",
         "preserve_pose",
     ),
-    "operators": (),
-    "ui": (),
+    "operators": ("create", "enable", "disable", "bake", "cinematography"),
+    "ui": ("panel",),
 }
 
 
@@ -62,9 +65,9 @@ def register():
 
     _reload()
 
-    from . import utils, core, operators, ui
+    from . import utils, core, preferences, operators, ui
 
-    for mod in (utils, core, operators, ui):
+    for mod in (utils, core, preferences, operators, ui):
         if hasattr(mod, "register"):
             mod.register()
 
@@ -72,9 +75,9 @@ def register():
 def unregister():
     import bpy
 
-    from . import utils, core, operators, ui
+    from . import utils, core, preferences, operators, ui
 
-    for mod in reversed((utils, core, operators, ui)):
+    for mod in reversed((utils, core, preferences, operators, ui)):
         if hasattr(mod, "unregister"):
             mod.unregister()
 

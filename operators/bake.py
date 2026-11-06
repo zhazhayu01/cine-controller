@@ -11,36 +11,41 @@ Bake 的职责：采样当前真实 evaluated Camera Matrix，Bake 成普通 Cam
 """
 import bpy
 
-from ..core import rig
+from ..core import rig, dolly_zoom
 
 
 class CINE_OT_bake(bpy.types.Operator):
     bl_idname = "cine.bake"
-    bl_label = "Bake to Keyframes"
-    bl_description = "采样 evaluated Camera Matrix，解除 Rig 后 Bake 成普通相机关键帧"
+    bl_label = "烘焙为关键帧"
+    bl_description = "采样摄像机最终位姿，解除控制器后烘焙为普通相机关键帧；希区柯克启用时同时烘焙焦距"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
+        obj = rig.resolve_camera(context)
         return obj is not None and obj.type == 'CAMERA' and obj.cine.enabled
 
     def execute(self, context):
-        camera = context.active_object
+        camera = rig.resolve_camera(context)
+        rig.make_independent(context, camera)
         scene = context.scene
         start = scene.frame_start
         end = scene.frame_end
         depsgraph = context.evaluated_depsgraph_get()
 
         cur = scene.frame_current
+        bake_lens = dolly_zoom.is_enabled(camera)
 
         # 1. 采样：逐帧读 evaluated matrix_world（真实结果，§40）
         samples = {}
+        lenses = {}
         for frame in range(start, end + 1):
             scene.frame_set(frame)
             depsgraph.update()
             cam_eval = camera.evaluated_get(depsgraph)
             samples[frame] = cam_eval.matrix_world.copy()
+            if bake_lens:
+                lenses[frame] = cam_eval.data.lens
 
         # 2. 移除 rig（解除 Controller）
         rig.remove_rig(context, camera)
@@ -54,14 +59,12 @@ class CINE_OT_bake(bpy.types.Operator):
             camera.keyframe_insert(data_path="location", frame=frame)
             camera.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 
-            # Lens 动画不丢失（§41）
-            cam_data = camera.data
-            if cam_data.animation_data is not None:
-                # 只对已有 lens 动画做逐帧拷贝（保守：不引入新动画）
-                pass
+            if bake_lens:
+                camera.data.lens = lenses[frame]
+                camera.data.keyframe_insert(data_path='lens', frame=frame, group='Cine 希区柯克烘焙')
 
         scene.frame_set(cur)
-        self.report({'INFO'}, f"Baked frames {start} → {end}")
+        self.report({'INFO'}, f"已烘焙第 {start} 至 {end} 帧")
         return {'FINISHED'}
 
 

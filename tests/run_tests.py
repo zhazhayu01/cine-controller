@@ -4,7 +4,7 @@
     blender -b -P tests/run_tests.py
 
 验证第一里程碑核心：
-    A. Enable 后 Camera 位姿不跳
+    A. Enable 后基础变换归零，内部朝向校正为水平
     B. Distance / Horizontal / Vertical Driver 生效
     C. Focus Target 移动不改变 Camera Transform
     D. Aim 影响 Orientation 但不影响 Position
@@ -64,22 +64,24 @@ from CineController.core import rig, preserve_pose
 from CineController.utils.math_utils import quaternion_angle_difference
 
 # ---------------------------------------------------------------------------
-# A. Enable 后不跳
+# A. 基础通道归零并采用水平拍摄基准，不继承旧画面
 # ---------------------------------------------------------------------------
 camera.cine.origin = origin
-before = camera.matrix_world.copy()
-
 result = rig.build_rig(bpy.context, camera, origin)
 after = result["after"]
 
-ok = preserve_pose.matrix_close(before, after)
+ok = preserve_pose.matrix_close(result["expected"], after)
 results.append(report(
-    "A. Enable 后位姿不跳",
+    "A. Enable 后基础归零，内部朝向水平",
     ok,
-    f"(pos_err={(before.to_translation() - after.to_translation()).length:.2e})"
+    f"(pos_err={after.to_translation().length:.2e})"
 ))
 
 params = camera.cine
+
+# 清零后距世界原点为 0；先设置非零半径，再验证轨道旋转。
+params.distance = 10.0
+rig.force_update(bpy.context, camera)
 
 # ---------------------------------------------------------------------------
 # B. Driver 生效：改 Distance / Horizontal / Vertical 后位置变化

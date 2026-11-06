@@ -2,7 +2,7 @@
 
 整个插件所有模块共用这一套函数，禁止各文件手写矩阵比较或轴转换。
 """
-from math import acos, atan2, cos, sin, sqrt
+from math import atan2, cos, sin, sqrt
 from mathutils import Matrix, Quaternion, Vector
 
 # 默认浮点容差（Blender Unit / radian）
@@ -29,11 +29,14 @@ def matrix_close(m1: Matrix, m2: Matrix, pos_tol=POSITION_TOLERANCE, rot_tol=ROT
 
 def quaternion_angle_difference(q1: Quaternion, q2: Quaternion) -> float:
     """返回两个四元数之间的最小角度差（弧度，[0, pi]）。"""
-    q1 = Quaternion(q1).normalized()
-    q2 = Quaternion(q2).normalized()
-    # dot 夹到 [-1, 1] 避免 acos 域错误
-    dot = max(-1.0, min(1.0, q1.dot(q2)))
-    return 2.0 * abs(acos(abs(dot)))
+    # 用双精度计算相对四元数；float32 dot + acos 会将相同朝向误判为漂移。
+    aw, ax, ay, az = q1
+    bw, bx, by, bz = q2
+    w = aw*bw + ax*bx + ay*by + az*bz
+    x = aw*bx - ax*bw - ay*bz + az*by
+    y = aw*by + ax*bz - ay*bw - az*bx
+    z = aw*bz - ax*by + ay*bx - az*bw
+    return 2.0 * atan2(sqrt(x*x + y*y + z*z), abs(w))
 
 
 def decompose_matrix(matrix: Matrix) -> tuple[Vector, Quaternion, Vector]:

@@ -83,7 +83,7 @@ bpy.ops.wm.open_mainfile(filepath=TMP)
 # 重开后重新定位 camera（名字是 Camera，用类型找）
 camera = next(o for o in bpy.data.objects if o.type == 'CAMERA')
 
-ok_reload_state = camera.cine.enabled and camera.cine.rig_root is not None
+ok_reload_state = camera.cine.enabled and camera.cine.internal_graph is not None and camera.parent is None
 results.append(report("R1. 重载后 Controller 状态保留", ok_reload_state))
 
 matrices_after = {}

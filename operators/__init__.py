@@ -5,16 +5,20 @@
 """
 import bpy
 
-from . import enable, disable, bake
+from . import enable, disable, bake, create, cinematography
 
 
 def register():
+    create.register()
     enable.register()
     disable.register()
     bake.register()
+    cinematography.register()
 
 
 def unregister():
+    cinematography.unregister()
     bake.unregister()
     disable.unregister()
     enable.unregister()
+    create.unregister()

@@ -1,326 +1,491 @@
-"""Rig 构建：Helper 层级 / Constraint / Driver / 参数反解。
+"""摄像机内部控制器：原生驱动器求值、绑定、解绑和旧版升级。
 
-规范关键点：
-    §9   依赖 Parent Hierarchy + Constraint + Driver（Dependency Graph），
-         禁止 frame_change_post / depsgraph_update_post 持续写回 Camera。
-    §12  Local / World Space 显式定义；RADIUS 在 BASE 之前（位置与朝向解耦）。
-    §13  Camera World Matrix 是最终真相。
-    §22/23 关系用 PointerProperty，不靠 Name String 重查。
-    §33  Constraint 创建显式指定 owner_space / target_space / track_axis / up_axis / influence。
-    §34  Driver 绝对驱动（= horizontal，而非 += horizontal）。
-    §35  简单 Driver Variable + Expression，不用自定义 Driver Namespace。
-
-Rig 层级（遵循规范 §12 建议顺序）：
-    ROOT   (Empty)  World Position = Origin（Copy Location，world→world）
-      └─ YAW    (Empty)  Local rot.z = horizontal        [Driver]
-          └─ PITCH  (Empty)  Local rot.x = vertical      [Driver]
-              └─ DIST   (Empty)  Local loc.y = -distance  [Driver，位置，在 BASE 之前]
-                  └─ BASE   (Empty)  Local rot = 反解的朝向基准   [Enable 时反解]
-                      └─ OFFSET (Empty)  Local loc = cine_offset→blender_local  [Driver x3]
-                          └─ AIM    (Empty)  Track To → Aim Target, influence [约束]
-                              └─ LOCAL_ROT (Empty)  Local euler = (tilt, pan, -roll)  [Driver x3]
-                                  └─ CAMERA  (真实 Camera 对象，local = identity)
-
-轴约定（§58，经实测验证）：
-    BASE 之后的本地轴 = camera 朝向轴：+X=Right, +Y=Up, -Z=Forward。
-    因此 OFFSET.location = (offset.x, offset.y, -offset.z)。
-    LOCAL_ROT：tilt=绕 +X(Right), pan=绕 +Y(Up), roll=绕 Forward(-Z) = -euler.z。
-
-位置公式（与 utils.math_utils 一致）：
-    R_z(h)·R_x(v)·(0, -d, 0) = (d·sin h·cos v, -d·cos h·cos v, -d·sin v)
+不创建 Empty/Collection，不注册驱动命名空间或逐帧写回处理器。
+基础变换固定为单位变换，空间计算通过增量位置/四元数输出。
 """
 import bpy
-from math import pi
-from mathutils import Matrix, Quaternion
+from mathutils import Matrix, Vector, Quaternion
 
-from ..utils import math_utils as mu
+from .driver_graph import PREFIX, build_graph
+from ..utils.math_utils import solve_orbit_from_pose
+from ..utils.axis_utils import default_camera_rotation
 
-
-def compose_orbit_rotation(horizontal: float, vertical: float) -> Matrix:
-    """YAW·PITCH 的累计旋转 R_orbit = R_z(h)·R_x(v)。
-
-    这是「朝向基准」之前的轨道旋转，用于反解 BASE。
-    """
-    return (
-        Matrix.Rotation(horizontal, 4, 'Z')
-        @ Matrix.Rotation(vertical, 4, 'X')
-    )
+LEGACY_HELPERS = ('rig_root', 'rig_yaw', 'rig_pitch', 'rig_dist', 'rig_base',
+                  'rig_offset', 'rig_aim', 'rig_local_rot')
+TRANSFORM_PATHS = {'location', 'rotation_euler', 'rotation_quaternion',
+                   'rotation_axis_angle', 'scale', 'delta_location',
+                   'delta_rotation_euler', 'delta_rotation_quaternion', 'delta_scale'}
+STATE_KEY = PREFIX + 'restore'
 
 
-def read_evaluated_camera_matrix(context, camera_obj) -> Matrix:
-    """读取 Camera 的 evaluated 世界矩阵（规范 §14）。
+def resolve_camera(context):
+    """面板与操作共用目标：选中摄像机 → 上次控制的摄像机 → 渲染摄像机。"""
+    obj = getattr(context, 'active_object', None)
+    if obj is not None and obj.type == 'CAMERA':
+        return obj
+    if obj is not None and obj.type == 'CURVE' and obj.cine_camera is not None:
+        camera = obj.cine_camera
+        if camera.cine.controller == obj:
+            return camera
+    scene = getattr(context, 'scene', None)
+    return (scene.cine_camera or scene.camera) if scene is not None else None
 
-    统一入口：Bake / 对比测试 / Preserve Pose 都走这里。
-    """
-    depsgraph = context.evaluated_depsgraph_get()
-    camera_eval = camera_obj.evaluated_get(depsgraph)
-    return camera_eval.matrix_world.copy()
+
+def read_evaluated_camera_matrix(context, camera_obj):
+    return camera_obj.evaluated_get(context.evaluated_depsgraph_get()).matrix_world.copy()
 
 
 def force_update(context, camera_obj):
-    """程序化修改参数后强制 Depsgraph 重新求值。
-
-    在 GUI 中用户改属性会自动触发更新；但在 headless / 脚本 / 后台渲染场景下，
-    直接改 Python 属性不会自动 tag Depsgraph（Blender 已知行为 issue #91140），
-    需要显式 update_tag + view_layer.update 才能让 Driver 重新求值。
-
-    规范 §36 要求架构兼容 Background Render，因此提供此统一入口。
-    """
-    # tag 所有相关对象（Camera + Helper 链）为需要更新
+    """仅供脚本强制求值；播放、渲染与目标动画由 Blender 依赖图驱动。"""
     camera_obj.update_tag()
-    params = camera_obj.cine
-    for helper in (params.rig_root, params.rig_yaw, params.rig_pitch,
-                   params.rig_dist, params.rig_base, params.rig_offset,
-                   params.rig_aim, params.rig_local_rot):
-        if helper is not None:
-            helper.update_tag()
+    if camera_obj.cine.controller is not None:
+        camera_obj.cine.controller.update_tag()
     context.view_layer.update()
     context.evaluated_depsgraph_get().update()
 
 
-def _get_rig_collection(context):
-    """获取或创建存放 Cine Rig Helper 的独立 Collection。
-
-    集中管理：用户可在 Outliner 一眼看到 rig 结构，并可整体隐藏/禁用。
-    默认在视口隐藏 + 渲染禁用 + 从 View Layer 排除（helper 是纯逻辑节点，不参与显示/渲染）。
-    实测：exclude 不影响 driver/constraint 求值（camera 不在该集合内）。
-    """
-    coll = bpy.data.collections.get("Cine Rig")
-    if coll is None:
-        coll = bpy.data.collections.new("Cine Rig")
-        context.scene.collection.children.link(coll)
-
-    # 默认隐藏：视口不可见 + 渲染禁用
-    coll.hide_viewport = True
-    coll.hide_render = True
-
-    # Exclude from View Layer（作用在 layer_collection 上）
-    for lc in _iter_layer_collections(context.view_layer.layer_collection):
-        if lc.name == "Cine Rig":
-            lc.exclude = True
-            break
-
-    return coll
+def compose_orbit_rotation(horizontal, vertical):
+    return Matrix.Rotation(horizontal, 4, 'Z') @ Matrix.Rotation(vertical, 4, 'X')
 
 
-def _iter_layer_collections(layer_collection):
-    """递归遍历 view layer 的 layer_collection 树。"""
-    yield layer_collection
-    for child in layer_collection.children:
-        yield from _iter_layer_collections(child)
+def _action_curves(action):
+    """兼容旧 Action 与 Blender 4.4+ 分层 Action。"""
+    if action is None:
+        return
+    yield from getattr(action, 'fcurves', ())
+    for layer in getattr(action, 'layers', ()):
+        for strip in layer.strips:
+            for bag in getattr(strip, 'channelbags', ()):
+                yield from bag.fcurves
 
 
-def _new_empty(context, name: str, parent=None):
-    """创建一个 Empty Helper，挂到 Cine Rig Collection，并锁定防误操作。
+def _check_camera(camera):
+    """先验证再写入，不覆盖外部变换驱动器、关键帧和约束。"""
+    if camera.library is not None:
+        raise ValueError('请先将链接摄像机设为本地对象或创建库覆盖')
+    controller = camera.cine.controller
+    if controller is not None and (controller.type != 'CURVE' or controller in camera.children_recursive):
+        raise ValueError('控制对象必须是摄像机子级之外的曲线')
+    if any(c.influence != 0 and not c.mute for c in camera.constraints):
+        raise ValueError('摄像机存在外部变换约束，请先烘焙或停用这些约束')
+    animation = camera.animation_data
+    if animation:
+        for driver in animation.drivers:
+            if driver.data_path in TRANSFORM_PATHS:
+                raise ValueError('摄像机已有变换驱动器，请先移除或烘焙后再启用')
+        actions = [animation.action]
+        for track in animation.nla_tracks:
+            for strip in track.strips:
+                actions.append(strip.action)
+        for action in actions:
+            if any(curve.data_path in TRANSFORM_PATHS for curve in _action_curves(action)):
+                raise ValueError('摄像机已有位置/旋转动画，请先复制摄像机或整理动画后再启用')
+    if any(key.startswith(PREFIX) for key in camera.keys()):
+        raise ValueError('摄像机存在内部控制器数据，请先停用或升级已有控制器')
+    for target in (camera.cine.origin, camera.cine.aim_target):
+        if target is not None and (target == camera or target in camera.children_recursive):
+            raise ValueError('空间原点或瞄准目标不能使用摄像机自身或其子级，避免循环依赖')
 
-    锁定只阻止用户在视口误选 / 手动误拖变换；driver 与 constraint 的求值不受影响。
-    """
-    empty = bpy.data.objects.new("CC_" + name, None)
-    empty.empty_display_type = 'PLAIN_AXES'
-    empty.empty_display_size = 0.25
 
-    # 锁定：视口不可选 + 锁定 location/rotation/scale（防误操作）
-    empty.hide_select = True
-    empty.lock_location = (True, True, True)
-    empty.lock_rotation = (True, True, True)
-    empty.lock_scale = (True, True, True)
-
-    _get_rig_collection(context).objects.link(empty)
-    if parent is not None:
-        empty.parent = parent
-    return empty
+def _snapshot(camera):
+    attrs = TRANSFORM_PATHS | {'matrix_parent_inverse', 'lock_location', 'lock_rotation',
+                              'lock_scale', 'lock_rotations_4d', 'lock_rotation_w'}
+    state = {}
+    for attr in attrs:
+        value = getattr(camera, attr)
+        state[attr] = value.copy() if hasattr(value, 'copy') else tuple(value) if hasattr(value, '__len__') else value
+    state['parent'] = camera.parent
+    state['rotation_mode'] = camera.rotation_mode
+    return state
 
 
-def _add_driver(obj, data_path: str, index: int, target_id, source_path: str, expression: str):
-    """给 obj 的 data_path[index] 加一个绝对 Driver。
+def _reset_camera(camera):
+    camera.parent = None
+    camera.matrix_parent_inverse = Matrix.Identity(4)
+    camera.rotation_mode = 'QUATERNION'
+    camera.location = (0, 0, 0)
+    camera.rotation_euler = (0, 0, 0)
+    camera.rotation_quaternion = (1, 0, 0, 0)
+    camera.rotation_axis_angle = (0, 0, 1, 0)
+    camera.scale = (1, 1, 1)
+    camera.delta_location = (0, 0, 0)
+    camera.delta_rotation_euler = (0, 0, 0)
+    camera.delta_rotation_quaternion = (1, 0, 0, 0)
+    camera.delta_scale = (1, 1, 1)
 
-    变量为单值 SINGLE_PROP，expression 直接引用变量名（绝对驱动，非增量）。
-    """
-    fcurve = obj.driver_add(data_path, index)
-    driver = fcurve.driver
+
+def _restore_snapshot(camera, state):
+    # 切换旋转模式会转换当前旋转，必须先恢复模式，再恢复各通道数值。
+    camera.rotation_mode = state['rotation_mode']
+    camera.parent = state['parent']
+    for key, value in state.items():
+        if key not in {'rotation_mode', 'parent'}:
+            setattr(camera, key, value)
+
+
+def _add_driver(camera, owner, path, index, expression, bindings, source_object=None, storage=None):
+    curve = owner.driver_add(path) if index is None else owner.driver_add(path, index)
+    _clear_driver_mapping(curve)
+    driver = curve.driver
     driver.type = 'SCRIPTED'
-    var = driver.variables.new()
-    var.name = "v"
-    var.type = 'SINGLE_PROP'
-    t = var.targets[0]
-    t.id_type = 'OBJECT'
-    t.id = target_id
-    t.data_path = source_path
+    for variable in list(driver.variables):
+        driver.variables.remove(variable)
     driver.expression = expression
-    return driver
+    for name, (source_path, fallback) in bindings.items():
+        var = driver.variables.new()
+        var.name = name
+        var.type = 'SINGLE_PROP'
+        target = var.targets[0]
+        _set_driver_target(camera, target, source_path, source_object=source_object, storage=storage)
+        target.use_fallback_value = True
+        target.fallback_value = fallback
 
 
-def _solve_base_rotation(M0: Matrix, horizontal: float, vertical: float) -> Quaternion:
-    """反解 BASE 节点的旋转，使 camera 保持 Enable 时的世界朝向。
-
-    camera 世界朝向 = R_orbit(h,v) · R_base（OFFSET/AIM/LOCAL_ROT 均为 identity）。
-    要等于 M0 的旋转 R0，则 R_base = R_orbit⁻¹ · R0。
-
-    这样 offset 的轴（BASE 之后）= camera 实际朝向轴，pan/tilt/roll 保持 0。
-    """
-    r_orbit = compose_orbit_rotation(horizontal, vertical).to_quaternion()
-    r0 = M0.to_quaternion()
-    return r_orbit.inverted() @ r0
+def _clear_driver_mapping(curve):
+    """原样输出表达式；默认 Bezier 映射会将接近端点的矩阵分量吸附为 0/1。"""
+    curve.keyframe_points.clear()
+    for modifier in list(curve.modifiers):
+        curve.modifiers.remove(modifier)
 
 
-def build_rig(context, camera_obj, origin_obj) -> dict:
-    """为 camera_obj 构建 Cine Rig，并反解参数保持位姿不跳。
+def _set_driver_target(camera, target, source_path, source_object=None, storage=None):
+    # 通过摄像机指针路径解析目标，删除目标时仍有有效 ID，fallback 才能生效。
+    internal = source_path.startswith(f'["{PREFIX}')
+    target.id_type = 'NODETREE' if internal else 'OBJECT'
+    target.id = (storage or camera.cine.internal_graph) if internal else (source_object or camera)
+    target.data_path = source_path
 
-    返回 {"before": M0, "after": M1, "params": (d, h, v)} 供调用方验证。
-    """
-    from ..utils.math_utils import solve_orbit_from_pose
 
-    # 1. 记录修改前 Camera evaluated 世界矩阵
-    M0 = read_evaluated_camera_matrix(context, camera_obj)
+def _retarget_inputs(camera):
+    if camera.cine.internal_graph is None:
+        return
+    for key, _expression, bindings in build_graph(controller_space=camera.cine.controller is not None).nodes:
+        curve = camera.cine.internal_graph.animation_data.drivers.find(f'["{key}"]')
+        for variable in curve.driver.variables:
+            path = bindings[variable.name][0]
+            if '.matrix_world' in path:
+                _set_driver_target(camera, variable.targets[0], path)
 
-    # 2. 反解 orbit 参数（位置）+ BASE 朝向
-    origin_world = origin_obj.matrix_world.to_translation()
-    d, h, v = solve_orbit_from_pose(origin_world, M0.to_translation())
-    base_quat = _solve_base_rotation(M0, h, v)
 
+def _install_graph(camera):
+    graph = build_graph(controller_space=camera.cine.controller is not None)
+    # 使用独立数据块隔离 Object.PARAMETERS 与中间驱动结果；它不是场景对象。
+    storage = bpy.data.node_groups.new('.CineController.' + camera.name, 'ShaderNodeTree')
+    camera.cine.internal_graph = storage
+    for key, _expression, _bindings in graph.nodes:
+        storage[key] = 0.0
+    for key, expression, bindings in graph.nodes:
+        _add_driver(camera, storage, f'["{key}"]', None, expression, bindings)
+    for path, index, expression, bindings in graph.outputs:
+        _add_driver(camera, camera, path, index, expression, bindings)
+
+
+def needs_independent_graph(camera):
+    """Blender 原生复制会共享任意数据块指针，显式识别摄像机副本。"""
+    storage = camera.cine.internal_graph
+    if storage is None:
+        return False
+    curve = storage.animation_data.drivers.find('["_cine2_orb0"]')
+    from . import dolly_zoom
+    return storage.users > 1 or any(v.targets[0].id != camera for v in curve.driver.variables) or dolly_zoom.needs_independent(camera)
+
+
+def make_independent(context, camera):
+    """复制内部计算数据并重新绑定输入，保持副本参数与原摄像机独立。"""
+    if not needs_independent_graph(camera):
+        return
+    old = camera.cine.internal_graph
+    new = old.copy()
+    new.name = '.CineController.' + camera.name
+    camera.cine.internal_graph = new
+    for curve in new.animation_data.drivers:
+        for variable in curve.driver.variables:
+            target = variable.targets[0]
+            if target.id == old:
+                target.id = new
+            elif target.id_type == 'OBJECT' and target.data_path.startswith('cine.'):
+                target.id = camera
+    for curve in camera.animation_data.drivers:
+        for variable in curve.driver.variables:
+            if variable.targets[0].id == old:
+                variable.targets[0].id = new
+    _retarget_inputs(camera)
+    from . import dolly_zoom
+    dolly_zoom.ensure_owned(camera)
+    force_update(context, camera)
+
+
+def _clear_graph(camera):
+    """只移除本控制器拥有的通道；外部自定义属性与光学动画保持不变。"""
+    animation = camera.animation_data
+    if animation:
+        for curve in list(animation.drivers):
+            if curve.data_path in {'location', 'rotation_quaternion', 'scale',
+                                   'delta_location', 'delta_rotation_quaternion'}:
+                camera.driver_remove(curve.data_path, curve.array_index)
+    storage = camera.cine.internal_graph
+    camera.cine.internal_graph = None
+    if storage is not None and storage.users == 0:
+        bpy.data.node_groups.remove(storage)
+
+
+def build_rig(context, camera_obj, origin_obj=None):
+    """清零基础变换并建立内部控制器，失败时恢复修改前数据。"""
+    if camera_obj.cine.enabled:
+        raise ValueError('此摄像机已启用控制器')
+    if origin_obj == camera_obj:
+        raise ValueError('摄像机不能将自身作为空间原点')
+    _check_camera(camera_obj)
+    before = read_evaluated_camera_matrix(context, camera_obj)
+    original = _snapshot(camera_obj)
     params = camera_obj.cine
-    params.distance = d
-    params.horizontal = h
-    params.vertical = v
-    params.origin = origin_obj
-    # offset 归零（位置已由 orbit 反解）；pan/tilt/roll 归零（朝向已由 BASE 反解）
-    params.offset = (0.0, 0.0, 0.0)
-    params.pan = 0.0
-    params.tilt = 0.0
-    params.roll = 0.0
+    saved_params = {key: getattr(params, key) for key in ('distance', 'horizontal', 'vertical', 'pan', 'tilt', 'roll', 'rig_version')}
+    for key in ('offset', 'base_rotation', 'origin_fallback'):
+        saved_params[key] = tuple(getattr(params, key))
+    saved_origin = params.origin
+    saved_panel_camera = context.scene.cine_camera
+    try:
+        _reset_camera(camera_obj)
+        controller = params.controller
+        if controller is not None:
+            camera_obj.parent = controller
+        context.view_layer.update()
+        params.origin = origin_obj
+        origin = _origin_in_control_space(camera_obj, origin_obj)
+        params.origin_fallback = origin
+        # 基础通道归零，控制空间以 Origin 为零点；不再从世界零点反解出补偿环绕角。
+        params.distance = params.horizontal = params.vertical = 0.0
+        params.base_rotation = default_camera_rotation()
+        params.offset = (0, 0, 0)
+        params.pan = params.tilt = params.roll = 0.0
+        camera_obj[STATE_KEY] = {
+            'rotation_mode': original['rotation_mode'],
+            'lock_location': list(original['lock_location']),
+            'lock_rotation': list(original['lock_rotation']),
+            'lock_scale': list(original['lock_scale']),
+            'lock_rotations_4d': original['lock_rotations_4d'],
+            'lock_rotation_w': original['lock_rotation_w'],
+        }
+        _install_graph(camera_obj)
+        camera_obj.lock_location = camera_obj.lock_rotation = camera_obj.lock_scale = (True, True, True)
+        camera_obj.lock_rotations_4d = camera_obj.lock_rotation_w = True
+        params.rig_version = 2
+        params.enabled = True
+        context.scene.cine_camera = camera_obj
+        force_update(context, camera_obj)
+        after = read_evaluated_camera_matrix(context, camera_obj)
+        expected = default_camera_rotation().to_matrix().to_4x4()
+        expected.translation = origin
+        # 预设 Aim 仍按用户的瞄准设置控制朝向。
+        if params.aim_target is not None and params.aim_influence > 0:
+            expected = after.copy()
+            expected.translation = controller.matrix_world @ origin if controller else origin
+        elif controller is not None:
+            expected = controller.matrix_world @ expected
+        return {'before': before, 'expected': expected, 'after': after,
+                'params': (params.distance, params.horizontal, params.vertical)}
+    except Exception:
+        _clear_graph(camera_obj)
+        if STATE_KEY in camera_obj:
+            del camera_obj[STATE_KEY]
+        params.enabled = False
+        _restore_snapshot(camera_obj, original)
+        for key, value in saved_params.items():
+            setattr(params, key, value)
+        params.origin = saved_origin
+        context.scene.cine_camera = saved_panel_camera
+        force_update(context, camera_obj)
+        raise
 
-    # 3. 构建 Helper 层级（DIST 在 BASE 之前）
-    root = _new_empty(context, "ROOT", parent=None)
-    yaw = _new_empty(context, "YAW", parent=root)
-    pitch = _new_empty(context, "PITCH", parent=yaw)
-    dist = _new_empty(context, "DIST", parent=pitch)
-    base = _new_empty(context, "BASE", parent=dist)
-    offset = _new_empty(context, "OFFSET", parent=base)
-    aim = _new_empty(context, "AIM", parent=offset)
-    local_rot = _new_empty(context, "LOCAL_ROT", parent=aim)
 
-    # BASE 反解的朝向基准（用 QUATERNION 存储，避免 euler↔quat 精度损失）
-    base.rotation_mode = 'QUATERNION'
-    base.rotation_quaternion = base_quat
-    # LOCAL_ROT 显式 XYZ 顺序（§33 不依赖默认值）
-    local_rot.rotation_mode = 'XYZ'
+def _origin_in_control_space(camera, origin):
+    if origin is None:
+        return Vector((0, 0, 0))
+    position = origin.matrix_world.translation
+    controller = camera.cine.controller
+    return controller.matrix_world.inverted_safe() @ position if controller else position
 
-    # 4. ROOT 跟随 Origin 世界位置（Copy Location，显式 world→world）
-    con = root.constraints.new('COPY_LOCATION')
-    con.target = origin_obj
-    con.target_space = 'WORLD'
-    con.owner_space = 'WORLD'
-    con.use_x = True
-    con.use_y = True
-    con.use_z = True
 
-    # 5. Driver：绝对驱动
-    # YAW.rotation_euler.z = horizontal
-    _add_driver(yaw, "rotation_euler", 2, camera_obj, "cine.horizontal", "v")
-    # PITCH.rotation_euler.x = vertical
-    _add_driver(pitch, "rotation_euler", 0, camera_obj, "cine.vertical", "v")
-    # DIST.location.y = -distance（沿本地 -Y 后退 = 轨道半径）
-    _add_driver(dist, "location", 1, camera_obj, "cine.distance", "-v")
-    # OFFSET.location = (offset.x, offset.y, -offset.z)（Right/Up/Forward → 本地轴）
-    _add_driver(offset, "location", 0, camera_obj, "cine.offset[0]", "v")
-    _add_driver(offset, "location", 1, camera_obj, "cine.offset[1]", "v")
-    _add_driver(offset, "location", 2, camera_obj, "cine.offset[2]", "-v")
-    # LOCAL_ROT.rotation_euler = (tilt, pan, -roll)（roll 绕 Forward=-Z）
-    _add_driver(local_rot, "rotation_euler", 0, camera_obj, "cine.tilt", "v")
-    _add_driver(local_rot, "rotation_euler", 1, camera_obj, "cine.pan", "v")
-    _add_driver(local_rot, "rotation_euler", 2, camera_obj, "cine.roll", "-v")
+def reset_space_axes(context, camera):
+    """旧镜头显式恢复水平拍摄基准，保留 Distance、Origin、Aim 与光学参数。"""
+    from . import dolly_zoom
+    if dolly_zoom.is_enabled(camera):
+        raise ValueError('请先停用希区柯克工具，再重置普通空间轴向')
+    fields = ('horizontal', 'vertical', 'offset', 'pan', 'tilt', 'roll', 'base_rotation')
+    paths = {'cine.' + field for field in fields}
+    animation = camera.animation_data
+    if animation is not None:
+        curves = list(animation.drivers) + list(_action_curves(animation.action))
+        for track in animation.nla_tracks:
+            for strip in track.strips:
+                curves.extend(_action_curves(strip.action))
+        if any(curve.data_path in paths for curve in curves):
+            raise ValueError('环绕、偏移或旋转参数已有动画/驱动，请先整理这些通道再重置轴向')
+    make_independent(context, camera)
+    # 修复 0.2.0 已保存驱动器的默认映射，仅处理本控制器拥有的通道。
+    owned_paths = {'location', 'rotation_quaternion', 'scale', 'delta_location', 'delta_rotation_quaternion'}
+    for curve in camera.animation_data.drivers:
+        if curve.data_path in owned_paths:
+            _clear_driver_mapping(curve)
+    for curve in camera.cine.internal_graph.animation_data.drivers:
+        _clear_driver_mapping(curve)
+    params = camera.cine
+    params.horizontal = params.vertical = params.pan = params.tilt = params.roll = 0.0
+    params.offset = (0, 0, 0)
+    params.base_rotation = default_camera_rotation()
+    force_update(context, camera)
 
-    # 6. Camera 本地 transform = identity（朝向差异已进 BASE，位置已进 orbit）
-    camera_obj.parent = local_rot
-    camera_obj.matrix_local = Matrix.Identity(4)
 
-    # 7. 记录 Helper 引用到参数（PointerProperty，不靠名字）
-    params.rig_root = root
-    params.rig_yaw = yaw
-    params.rig_pitch = pitch
-    params.rig_dist = dist
-    params.rig_base = base
-    params.rig_offset = offset
-    params.rig_aim = aim
-    params.rig_local_rot = local_rot
-    params.enabled = True
+def import_camera_position(context, camera, source):
+    """从参考相机当前帧的最终位置反推轨道参数，不改变参考相机。"""
+    from . import dolly_zoom
+    params = camera.cine
+    if not params.enabled or params.rig_root is not None or params.internal_graph is None:
+        raise ValueError('请先启用或升级当前镜头的内部控制器')
+    if source is None or source == camera or source.type != 'CAMERA':
+        raise ValueError('请选择另一台摄像机作为位置参考')
+    if dolly_zoom.is_enabled(camera):
+        raise ValueError('请先停用希区柯克工具，再导入普通机位')
+    fields = ('distance', 'horizontal', 'vertical', 'offset')
+    paths = {'cine.' + field for field in fields}
+    animation = camera.animation_data
+    if animation is not None:
+        curves = list(animation.drivers) + list(_action_curves(animation.action))
+        for track in animation.nla_tracks:
+            for strip in track.strips:
+                curves.extend(_action_curves(strip.action))
+        if any(curve.data_path in paths for curve in curves):
+            raise ValueError('距离、环绕或偏移已有动画/驱动，请先整理这些通道再导入机位')
+    context.view_layer.update()
+    depsgraph = context.evaluated_depsgraph_get()
+    world_position = source.evaluated_get(depsgraph).matrix_world.translation.copy()
+    controller = params.controller
+    inverse = Matrix.Identity(4)
+    if controller is not None:
+        matrix = controller.evaluated_get(depsgraph).matrix_world
+        if abs(matrix.to_3x3().determinant()) <= 1e-12:
+            raise ValueError('控制器缩放为零或接近零，无法反推相对位置')
+        inverse = matrix.inverted()
+    position = inverse @ world_position
+    origin = (inverse @ params.origin.evaluated_get(depsgraph).matrix_world.translation
+              if params.origin is not None else Vector(params.origin_fallback))
+    values = solve_orbit_from_pose(origin, position)
+    make_independent(context, camera)
+    saved = (params.distance, params.horizontal, params.vertical, tuple(params.offset))
+    try:
+        params.distance, params.horizontal, params.vertical = values
+        params.offset = (0, 0, 0)
+        force_update(context, camera)
+        actual = read_evaluated_camera_matrix(context, camera).translation
+        if (actual - world_position).length > 1e-4 * max(1, (world_position - inverse.inverted().translation).length):
+            raise ValueError('反推位置与参考相机不一致，已恢复原参数')
+    except Exception:
+        params.distance, params.horizontal, params.vertical, params.offset = saved
+        force_update(context, camera)
+        raise
+    return values
 
-    # 8. 更新 Depsgraph 后读取结果
-    context.evaluated_depsgraph_get().update()
-    M1 = read_evaluated_camera_matrix(context, camera_obj)
 
-    return {"before": M0, "after": M1, "params": (d, h, v)}
+def _apply_origin(context, camera_obj, new_origin):
+    """重设原点时保持当前画面，不把旧 Offset 叠加两次。"""
+    params = camera_obj.cine
+    if params.rig_root is not None:
+        return  # 旧版结构通过显式升级入口迁移。
+    if new_origin == camera_obj:
+        return
+    # 目标指针已改变，使用旧参数重建旧的几何基准。
+    pre = compose_orbit_rotation(params.horizontal, params.vertical).to_quaternion() @ Quaternion(params.base_rotation)
+    position = camera_obj.matrix_world.translation
+    if params.controller is not None:
+        position = params.controller.matrix_world.inverted_safe() @ position
+    position -= pre @ Vector((params.offset.x, params.offset.y, -params.offset.z))
+    origin = _origin_in_control_space(camera_obj, new_origin) if new_origin else Vector(params.origin_fallback)
+    params.origin_fallback = origin
+    params.distance, params.horizontal, params.vertical = solve_orbit_from_pose(origin, position)
+    params.base_rotation = compose_orbit_rotation(params.horizontal, params.vertical).to_quaternion().inverted() @ pre
+    _retarget_inputs(camera_obj)
+    camera_obj.update_tag()
 
 
 def _apply_aim(context, camera_obj):
-    """根据 aim_target / aim_influence 设置 AIM 节点的 Track To 约束。
+    """所有瞄准参数均有显式驱动依赖，无须重建约束或写回变换。"""
+    if camera_obj.cine.rig_root is None:
+        _retarget_inputs(camera_obj)
+    camera_obj.update_tag()
 
-    只影响 Orientation，绝不触碰 Transform 参数。
-    """
-    params = camera_obj.cine
-    aim = params.rig_aim
-    if aim is None:
-        return
 
-    # 清除旧的 Cine Aim 约束（用名字前缀识别自己的约束）
-    for c in aim.constraints:
-        if c.type == 'TRACK_TO' and c.name.startswith("CC_AIM"):
-            aim.constraints.remove(c)
-
-    if params.aim_target is None:
-        return
-
-    con = aim.constraints.new('TRACK_TO')
-    con.name = "CC_AIM_TRACK"
-    con.target = params.aim_target
-    con.track_axis = 'TRACK_NEGATIVE_Z'
-    con.up_axis = 'UP_Y'
-    con.target_space = 'WORLD'
-    con.owner_space = 'WORLD'
-    con.influence = params.aim_influence
+def _delete_legacy_helpers(params):
+    for attr in LEGACY_HELPERS:
+        helper = getattr(params, attr)
+        setattr(params, attr, None)
+        if helper is not None:
+            bpy.data.objects.remove(helper, do_unlink=True)
+    collection = bpy.data.collections.get('Cine Rig')
+    if collection and not collection.objects and not collection.children:
+        bpy.data.collections.remove(collection)
 
 
 def remove_rig(context, camera_obj):
-    """移除 Rig：恢复 Camera 独立世界 transform（保持位姿），删除 Helper。
-
-    遵循 §70：只删除自己 PointerProperty 记录的 Helper。
-    """
+    """停用后保留最终世界画面，恢复基础通道可编辑性。"""
+    make_independent(context, camera_obj)
+    before = read_evaluated_camera_matrix(context, camera_obj)
+    from . import dolly_zoom
+    if dolly_zoom.is_enabled(camera_obj):
+        dolly_zoom.disable(context, camera_obj, preserve_lens=True)
     params = camera_obj.cine
-    helpers = [
-        params.rig_root, params.rig_yaw, params.rig_pitch,
-        params.rig_dist, params.rig_base, params.rig_offset,
-        params.rig_aim, params.rig_local_rot,
-    ]
-
-    # 1. 记录位姿
-    M0 = read_evaluated_camera_matrix(context, camera_obj)
-
-    # 2. 解除父子关系并保持世界 transform
-    if camera_obj.parent is not None:
-        camera_obj.parent = None
-        camera_obj.matrix_world = M0
-
-    # 3. 删除 Helper
-    for helper in helpers:
-        if helper is not None and helper.name in bpy.data.objects:
-            bpy.data.objects.remove(helper, do_unlink=True)
-
-    # 3b. 若 Cine Rig Collection 已空，清理之（只删自己的空集合）
-    coll = bpy.data.collections.get("Cine Rig")
-    if coll is not None and len(coll.objects) == 0 and len(coll.children) == 0:
-        bpy.data.collections.remove(coll)
-
-    # 4. 清空引用与状态
-    params.rig_root = None
-    params.rig_yaw = None
-    params.rig_pitch = None
-    params.rig_dist = None
-    params.rig_base = None
-    params.rig_offset = None
-    params.rig_aim = None
-    params.rig_local_rot = None
+    legacy = params.rig_root is not None
     params.enabled = False
+    restore = dict(camera_obj.get(STATE_KEY, {}))
+    if not legacy:
+        _clear_graph(camera_obj)
+    _reset_camera(camera_obj)
+    if legacy:
+        _delete_legacy_helpers(params)
+    for key, value in restore.items():
+        setattr(camera_obj, key, value)
+    if STATE_KEY in camera_obj:
+        del camera_obj[STATE_KEY]
+    camera_obj.matrix_world = before
+    force_update(context, camera_obj)
+    return {'before': before, 'after': read_evaluated_camera_matrix(context, camera_obj)}
 
-    context.evaluated_depsgraph_get().update()
-    M1 = read_evaluated_camera_matrix(context, camera_obj)
-    return {"before": M0, "after": M1}
+
+def upgrade_rig(context, camera):
+    """显式迁移旧 Helper 结构；沿用控制参数、动画和基准朝向。"""
+    params = camera.cine
+    if params.rig_root is None:
+        raise ValueError('此摄像机没有需要升级的旧版控制器')
+    before = read_evaluated_camera_matrix(context, camera)
+    base = params.rig_base.rotation_quaternion.copy()
+    root_position = params.rig_root.matrix_world.translation.copy()
+    original = _snapshot(camera)
+    old_base, old_origin = tuple(params.base_rotation), tuple(params.origin_fallback)
+    _check_camera(camera)
+    try:
+        _reset_camera(camera)
+        params.base_rotation = base
+        params.origin_fallback = root_position
+        camera[STATE_KEY] = {key: list(original[key]) for key in ('lock_location', 'lock_rotation', 'lock_scale')}
+        camera[STATE_KEY]['rotation_mode'] = original['rotation_mode']
+        camera[STATE_KEY]['lock_rotations_4d'] = original['lock_rotations_4d']
+        camera[STATE_KEY]['lock_rotation_w'] = original['lock_rotation_w']
+        _install_graph(camera)
+        camera.lock_location = camera.lock_rotation = camera.lock_scale = (True, True, True)
+        camera.lock_rotations_4d = camera.lock_rotation_w = True
+        force_update(context, camera)
+        after = read_evaluated_camera_matrix(context, camera)
+        from ..utils.math_utils import matrix_close
+        if not matrix_close(before, after, pos_tol=3e-5, rot_tol=3e-5):
+            raise ValueError('新旧控制器计算结果不一致，已取消升级')
+    except Exception:
+        _clear_graph(camera)
+        if STATE_KEY in camera:
+            del camera[STATE_KEY]
+        _restore_snapshot(camera, original)
+        params.base_rotation, params.origin_fallback = old_base, old_origin
+        force_update(context, camera)
+        raise
+    _delete_legacy_helpers(params)
+    params.rig_version = 2
+    context.scene.cine_camera = camera
+    return {'before': before, 'after': after}

@@ -10,10 +10,10 @@ echo "=============================================="
 echo "  Cine Controller P0 测试套件"
 echo "=============================================="
 
-for t in run_tests save_reload_test bake_test viewport_render_test offset_pan_test; do
+for t in position_import_test preferences_test cinematography_test cinematography_panel_test curve_controller_test default_axes_test internal_controller_test bind_reset_test run_tests native_reference_test upgrade_test panel_and_ownership_test save_reload_test bake_test viewport_render_test offset_pan_test target_lifecycle_test focus_reload_test render_restart_test; do
     echo ""
     echo ">>> 运行 $t ..."
-    "$BLENDER" -b -P "$DIR/tests/$t.py"
+    "$BLENDER" --factory-startup -b --python-exit-code 1 -P "$DIR/tests/$t.py"
 done
 
 echo ""

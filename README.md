@@ -1,198 +1,136 @@
 # Cine Controller for Blender
 
-电影级摄影机控制器（Cine Camera Rig）Blender 插件。
+电影级摄像机空间控制插件。目标平台：Blender 5.2 LTS；当前版本：**0.6.0**。
 
-**目标平台**：Blender 5.2 LTS
-**当前版本**：0.1.0（第一里程碑已完成）
+## 这一版的变化
 
-## 核心承诺
+- 新增参考机位反推：用自由相机摆好位置后，导入为当前镜头的距离、水平环绕和垂直环绕；以控制器本地坐标和当前空间原点计算。
+- 主面板改为图标优先，去掉长按钮文字、重复分组标题和常驻说明；操作名称与说明通过悬停查看。
+- 齿轮入口只保留通用界面选项与新建镜头预设；当前镜头参数全部留在相机侧栏。
+- 插件设置可开启“显示参数名称”；默认关闭，只保留图标、对象名、XYZ 与数值。
+- 选中曲线后，可用“插入镜头关键帧”记录控制器变换、空间参数、焦距、镜头偏移和景深参数。不新增任何键位绑定。
+- 焦距直接显示在主面板，常用构图和希区柯克变焦使用紧凑图标；高级参数保留在侧栏默认折叠的“相机设置”中。
+- 新增可启用的希区柯克工具，推拉时按主体实际光轴深度联动焦距，支持连同焦距一起烘焙。
+- 新增“创建相机和曲线控制器”：在 3D 游标处一键生成已绑定的摄像机与可见 Curve 控制器。
+- 选中曲线即可操作对应镜头；移动/旋转曲线带动摄像机，曲线默认不参与渲染。
+- 不再为摄像机生成 8 个 Empty，不创建 `Cine Rig` 集合。
+- 基础位置、旋转归零并锁定；空间移动和旋转全部通过插件参数控制。
+- 零角度默认水平朝世界 +Y、Z 向上，距离沿前后方向，不再需要垂直 90° 补偿。
+- 环绕、偏移、瞄准混合及局部旋转由内部驱动计算，结果输出到摄像机增量变换。
+- Cine 面板常驻，选中其他物体时仍能控制备用摄像机。
+- 旧工程可以显式升级，保留已有镜头与参数动画。
 
-一个已经调好的镜头，在保存、关闭、重新打开 Blender 之后，必须还是原来的镜头。
+## 安装与使用
 
-```text
-Camera(Viewport, Frame N)
-=
-Camera(Render, Frame N)
-=
-Camera(After Reload, Frame N)
-=
-Camera(Baked, Frame N)
-```
+将完整 `CineController` 目录作为 Blender 插件安装或更新，然后重新启用插件。打开 3D 视图侧栏（N），选择 **Cine**。
 
-允许的差异只有浮点容差，不允许肉眼可见变化。三条质量标准：
+**一键创建：** 点击面板顶部的加号图标，悬停说明为“创建相机和曲线控制器”。只新增一个 Curve 控制器和一台摄像机，控制器外形由圆环、取景框、+Y 前向箭头组成，创建后自动选中它。默认距离为 5 个场景单位，可在插件设置中预设；其他控制角度为零，镜头水平朝向控制器中心。使用 G/R 移动、旋转曲线，或直接在常驻 Cine 面板调整对应摄像机参数。
 
-> - 今天调好、绑定 Origin/Aim/Focus，保存后关机，第二天打开镜头必须完全一样。
-> - Camera View 里看到什么，正式 Render 就是什么。
-> - 交付导出（Houdini / Unreal / Alembic / FBX）时只要 Bake，得到的动画与实时 Controller 完全一致。
+没有场景渲染摄像机时，新镜头会成为渲染摄像机；已有渲染摄像机时保持原设置。可以连续创建多个独立镜头。曲线只用于可见的整体控制，内部数学计算不生成额外 Empty。
 
-## 功能状态
+也可以继续给已有普通摄像机启用内部控制器：
 
-| 功能 | 状态 |
-|------|------|
-| Enable / Disable Controller | ✅ 已实现（事务化 + 位姿不跳） |
-| Origin / Distance / Horizontal / Vertical | ✅ 已实现（Driver 绝对驱动） |
-| Aim Target / Aim Influence | ✅ 已实现（Track To 约束） |
-| Focus Target | ✅ 已实现（DOF，与 Transform 解耦） |
-| Position Offset | ✅ 已实现（沿 Camera Right/Up/Forward） |
-| Pan / Tilt / Roll | ✅ 已实现（绕本地轴，不改变位置） |
-| Bake to Keyframes | ✅ 已实现（采样 evaluated matrix） |
+1. 选中摄像机，或在未选中摄像机时用面板顶部的选择器指定摄像机。
+2. 点击“启用控制器”。新绑定会将基础位置、旋转和控制角度清零，缩放恢复为一。最终位置从空间原点开始，内部校正为水平朝 +Y、Z 向上，不保留绑定前的画面。
+3. 在“空间移动”中调整距离、水平/垂直环绕和空间偏移；在“空间旋转”中调整瞄准、水平摇摄、俯仰和翻滚。
+4. 空间原点可不指定，默认世界原点。初始距离为零，增加距离后相机沿空间原点的 -Y 方向后退，同高度朝原点拍摄；原点有高度时也不会自动变成垂直环绕。
+5. 对焦目标只改变 DOF，不改变摄像机位姿。
+6. “停用控制器”保留当前画面并恢复基础通道编辑。“烘焙为关键帧”将整个场景帧范围转换为普通位置与四元数动画。
 
-## 安装
+面板优先跟随当前选中的摄像机或其曲线控制器；选中其他对象时使用上次控制的摄像机，或场景渲染摄像机。没有摄像机时仍可用顶部按钮一键创建。备用目标与启用/停用、升级、烘焙使用同一套解析规则。
 
-1. 把整个 `CineController/` 目录复制到 Blender addons 目录，或
-   在 `Edit > Preferences > Add-ons > Install` 选择本目录的 `__init__.py` 所在包。
-2. 搜索 **Cine Controller** 并启用。
-3. 选中一个 Camera，在 `3D Viewport > Sidebar (N) > Cine` 面板操作。
+曲线控制模式下，摄像机是曲线的子对象，基础位置/旋转仍归零锁定。外部瞄准目标和空间原点会先转换到曲线本地空间，避免旋转或移动被重复叠加。停用或烘焙后摄像机脱离曲线并保持最终世界画面；曲线对象保留供用户整理，选择它仍能在面板找到对应相机。
 
-## 快速上手
+## 从自由相机反推机位
 
-1. 场景里放一个 Camera、一个 Empty（作为 Origin）。
-2. 选中 Camera，面板里设 **Origin** 指向那个 Empty，点 **Enable Controller**。
-3. 调整 Distance / Horizontal / Vertical，相机绕 Origin 轨道运动。
-4. 需要看向某个目标：设 **Aim Target** + **Aim Influence**。
-5. 需要焦点：设 **Focus Target**（只影响 DOF，绝不影响机位）。
-6. 交付时点 **Bake to Keyframes**，得到普通 Camera 关键帧动画。
+1. 用一台独立的自由相机摆好位置。
+2. 选中目标镜头的曲线控制器，在 Cine 面板的“参考相机”选择框中指定这台自由相机。
+3. 点击选择框右侧的导入图标（悬停显示“从参考相机反推位置”）。
 
-## 架构：Single Source of Truth
+导入只采样当前帧的最终位置，计算距离、水平环绕和垂直环绕，并将空间偏移归零。控制器的移动、旋转和缩放都会参与坐标转换；指定空间原点时围绕该目标计算，否则使用当前镜头保存的中心。参考相机不会被修改，目标镜头的摇摄、俯仰、翻滚、瞄准及光学参数继续保留，可手动调整朝向。反推后的画面朝向可能与参考相机不同。
 
-```text
-Cine Controller Parameters
-        ↓
-Blender Dependency Graph
-        ↓
-FINAL Controller Transform
-        ↓
-Actual Camera Evaluated Transform
-        ↓
-┌──────────────┬──────────────┬──────────────┐
-│ Viewport     │ Render       │ Bake         │
-└──────────────┴──────────────┴──────────────┘
-```
+反推是一次性操作，不创建持续跟随关系，也不自动插帧。已有距离、环绕、偏移动画或驱动器时会拒绝覆盖；希区柯克启用期间请先停用该工具。原来的“启用控制器”仍执行归零绑定，不自动保留原机位。
 
-Viewport、Render、Bake 必须读取同一个最终 evaluated Camera Transform。
-实时求值依赖 Parent Hierarchy + Constraint + Driver，**不使用**
-`frame_change_post` / `depsgraph_update_post` / `load_post` 写回 Camera。
+## 镜头关键帧与构图
 
-### Rig 层级
+选中曲线，点击顶部关键帧图标，悬停说明为“插入镜头关键帧”。普通模式记录曲线移动/旋转、摄像机空间参数，以及焦距、正交范围、传感器宽度、镜头偏移、对焦距离和光圈；不会给被内部驱动器锁定的基础相机变换插帧。已有外部驱动器的输出也不会被插帧覆盖。仍可在单个参数上使用 Blender 原生的插帧方式，本插件不改动快捷键。
 
-```text
-ROOT   (Empty)  World Position = Origin（Copy Location，world→world）
-  └─ YAW    (Empty)  Local rot.z = horizontal        [Driver]
-      └─ PITCH  (Empty)  Local rot.x = vertical      [Driver]
-          └─ DIST   (Empty)  Local loc.y = -distance  [Driver，位置在 BASE 之前]
-              └─ BASE   (Empty)  Local rot = 反解的朝向基准   [Enable 时反解]
-                  └─ OFFSET (Empty)  Local loc = (offset.x, offset.y, -offset.z)  [Driver x3]
-                      └─ AIM    (Empty)  Track To → Aim Target  [约束]
-                          └─ LOCAL_ROT (Empty)  Local euler = (tilt, pan, -roll)  [Driver x3]
-                              └─ CAMERA  (真实 Camera 对象，local = identity)
-```
+主面板的相机图标数值直接编辑焦距，不复制一份代理值。底部四个构图图标分别控制三分线、中心线、安全框和画幅外遮罩。参考线只在相机视图显示，不进入最终渲染。
 
-Camera 相对 Origin 的位置（与 rig 求值严格一致）：
+点击齿轮打开插件设置，只调整通用界面选项和新建镜头默认值，默认值只影响之后创建的镜头。当前镜头的投影、传感器、裁剪、镜头偏移和高级构图在侧栏默认折叠的“相机设置”中调整，直接编辑原生相机数据，随 `.blend` 保存。
+
+主面板始终显示景深开关、对焦目标和对焦距离；指定目标后距离框禁用，由目标位置决定焦点。启用景深后显示光圈。希区柯克主体也直接放在主面板，启用前即可选择。
+
+“进入此相机视图”使用当前 3D 视图的局部摄像机，不更改渲染相机；需要切换渲染镜头时，另点“设为渲染相机”。
+
+## 希区柯克变焦
+
+1. 使用带曲线控制器的透视摄像机，先调好机位与焦距。
+2. 如需指定主体，在相机主面板的双镜头图标旁选择“希区柯克主体”；留空时使用瞄准目标、空间原点，或锁定启用瞬间的控制器中心。
+3. 点击双镜头图标启用“希区柯克变焦”，图标按下表示正在启用。工具记录当前构图、焦距和主体光轴深度；启用后普通空间参数暂时旁路，采用捕获的相机本地朝向和主面板底部的推拉数值，控制器本身仍可移动/旋转。
+4. 调整“镜头轴推拉”：正值向前推进，负值后退，焦距按 `基准焦距 × 当前主体深度 / 基准主体深度` 自动补偿。可用“插入镜头关键帧”记录控制器变换、推拉和光学参数；焦距由联动计算，不重复插入焦距输出帧。
+5. 完成后点击“烘焙为关键帧”，同时得到普通相机位置、四元数及逐帧焦距动画。点“停用并返回原运镜”则恢复原空间参数及原焦距动画，保留原 Action。
+
+联动期间，整个控制器的“停用控制器”入口暂不可用；请选择工具本身的停用入口，或烘焙当前效果，避免解除空间控制时只保留机位却丢失变焦补偿。
+
+该效果针对主体所在深度平面的画面比例；改变构图角度、主体姿态、传感器或穿过主体，不能保证整个三维物体轮廓完全不变。主体必须位于镜头前方；推拉到主体后方时面板会提示，焦距仍保持合法范围。焦距已有外部驱动器、相机数据被多镜头共用或不是透视投影时，会拒绝启用，避免覆盖其他镜头。
+
+## 旧工程与摄像机复制
+
+0.2.0 的已有镜头会继续保留原画面。若此前使用垂直 90°、水平摇摄 -90° 等角度补偿，更新后点击“重置为水平轴向”：保留距离、空间原点、瞄准和光学设置，清零环绕、偏移及局部旋转。若这些通道已有关键帧或驱动器，先整理动画再执行，避免静默改变已有镜头。
+
+打开旧版工程不会自动改动镜头。选中旧摄像机后，在面板点击“升级内部控制器”，保留参数及其关键帧，验证当前画面一致后移除旧 Helper。升级失败时恢复旧结构。
+
+使用 Blender 原生复制摄像机后，如果面板提示共享内部数据，点击“独立化摄像机副本”，之后两个镜头的空间控制相互独立。停用或烘焙也会先自动完成独立化。
+
+已存在外部位置/旋转动画、变换驱动器或有效约束的普通摄像机，不会被直接覆盖。请先整理原有动画或使用另一台摄像机；`cine.*` 参数动画和 Lens 动画可继续使用。
+
+## 内部结构
 
 ```text
-R_z(h) · R_x(v) · (0, -d, 0)
-= ( d·sin h·cos v,  -d·cos h·cos v,  -d·sin v )
+摄像机参数与目标世界坐标
+    → 内部原生驱动器计算
+    → 摄像机增量位置 / 四元数
+    → evaluated Camera Matrix
+    → 视口 / 渲染 / 保存重开 / 烘焙
 ```
 
-vertical = 0 → 水平环绕；vertical = +90° → 正下方（俯视上方）。
+中间标量保存在摄像机持有的一个内部计算数据块中，不出现在场景对象层级，不生成辅助对象或集合。它使用无节点的 ShaderNodeTree 作为持久化容器，不参与着色；独立数据块也隔离了参数与输出之间的依赖循环。
 
-轴约定（§58）：BASE 之后的本地轴 = camera 朝向轴 `+X=Right, +Y=Up, -Z=Forward`。
-OFFSET 直接沿这些轴移动；LOCAL_ROT 中 tilt=绕+X、pan=绕+Y、roll=绕-Z（Forward）。
+运行时不使用自定义 Python 驱动函数、逐帧处理器或计时器。驱动器全部采用 Blender 的简单表达式，保存后由依赖图继续求值。实时使用仍需要插件注册参数类型；交给不装插件的环境前请先烘焙。
 
-### 三个独立系统域
+删除瞄准目标会关闭瞄准。删除原点目标时，使用绑定或最近一次重设原点时保存的备用原点；如果原点后来已经移动，删除它可能改变机位。目标改名不影响关系。
 
-| 系统 | 职责 | 输出 |
-|------|------|------|
-| Transform System | Origin / Distance / Horizontal / Vertical / Position Offset | Camera Position |
-| Orientation System | Aim Target / Aim Influence / Pan / Tilt / Roll | Camera Rotation |
-| Optical System | Lens / Sensor / Shift / DOF / Focus Target / Focus Distance / F-Stop | Camera Data |
+详细设计、空间顺序和兼容边界见 [内部控制器架构](docs/内部控制器架构.md)。旧版稳定性规范作为历史资料保留，关于 Empty、Track To 和启用时保持画面的条款已由新架构取代。
 
-- Focus System 与 Transform System **完全解耦**，Focus Target 绝不经 Helper 影响机位。
-- Optical 变化绝不触发 Rig Rebuild。
+## 代码结构
 
-## 目录结构
+- `core/driver_graph.py`：将空间计算编译为显式连接的简单驱动表达式。
+- `preferences.py`：通用界面密度与新镜头默认值。
+- `core/controller_shape.py`：原生 Curve 控制器外形。
+- `core/rig.py`：绑定、停用、升级、副本独立化及目标解析。
+- `core/properties.py`：用户参数与内部基准，沿用 `cine.*` 动画路径。
+- `core/optical_system.py`：DOF 参数，与空间计算隔离。
+- `core/dolly_zoom.py`：希区柯克的捕获、原生光学驱动、启停及副本隔离。
+- `operators/cinematography.py`：镜头插帧、相机视图、构图与工具入口。
+- `operators/`：启用、停用、升级、独立化和烘焙。
+- `ui/panel.py`：常驻侧栏面板。
+- `tests/`：Blender 运行时回归测试。
 
-```text
-CineController/
-├── __init__.py                # 插件入口：bl_info + register/unregister + 热重载
-├── core/                      # 核心求解逻辑（纯函数，无 UI 依赖）
-│   ├── properties.py          # PropertyGroup 参数 + 最小副作用 update
-│   ├── transform_system.py    # 位置求解
-│   ├── orientation_system.py  # 旋转求解
-│   ├── optical_system.py      # DOF / Lens 写入
-│   ├── rig.py                 # Rig 构建 / 约束 / Driver / force_update
-│   └── preserve_pose.py       # Preserve Pose 统一底层（Matrix 验证）
-├── operators/
-│   ├── enable.py              # Enable（事务化 + 失败回滚）
-│   ├── disable.py             # Disable
-│   └── bake.py                # Bake（采样 → 解绑 → 写 quaternion）
-├── ui/
-│   └── panel.py               # View3D Sidebar 面板
-├── utils/
-│   ├── math_utils.py          # matrix_close / quaternion_angle / orbit 反解
-│   └── axis_utils.py          # 轴转换唯一入口（-Z = Forward 映射）
-├── tests/                     # P0 自动化一致性测试
-│   ├── run_tests.py           # Enable不跳 / Driver / Focus独立 / Aim / 幂等
-│   ├── save_reload_test.py    # 真实 save+reload 逐帧矩阵一致
-│   ├── bake_test.py           # Live ≈ Baked 每帧
-│   ├── viewport_render_test.py# Viewport ≈ Render + scene.camera 切换
-│   ├── offset_pan_test.py     # Offset 方向 + pan/tilt/roll 绕本地轴
-│   ├── run_all.sh             # 一键跑全部
-│   └── scenes/                # 测试场景（camera_consistency.blend 等）
-└── docs/                      # 稳定性与统一求值规范
+## 验证
+
+在 PowerShell 中运行：
+
+```powershell
+.\tests\run_all.ps1
+# 自定义 Blender 路径：
+.\tests\run_all.ps1 -Blender 'D:\Blender\blender.exe'
 ```
 
-## 测试
+测试日志保存在 `tests/_output/`。测试失败或检测到依赖循环时，脚本返回失败，不把 Blender 的正常退出误当成测试通过。
 
-```bash
-# 一键跑全部 P0 测试（需本机已装 Blender 5.2）
-bash tests/run_all.sh
+覆盖曲线创建与绑定、整体移动旋转、外部目标的空间转换、120 组原生层级/Track To 数值对照、目标生命周期、保存重载、烘焙、20 帧旧版升级、面板目标解析、副本隔离和故障注入回滚。普通模式和曲线模式分别通过独立进程，验证禁用脚本自动执行时的子帧、目标/控制器动画，以及真实 RENDER 依赖图中的摄像机矩阵。
 
-# 或单独跑
-blender -b -P tests/run_tests.py
-```
+渲染测试使用测试 RenderEngine 检查实际 RENDER 依赖图，不包含 Cycles/EEVEE 像素结果。紧凑面板另在独立 Blender GUI 窗口中检查过实际绘制。后台脚本直接修改参数后可调用 `rig.force_update()`；时间线动画和渲染不依赖这项手动刷新。
 
-当前测试结果：**5 套 27 项全部通过，矩阵误差 0**。
-
-| 测试 | 覆盖 | 结果 |
-|------|------|------|
-| run_tests | Enable 不跳 / Driver 生效 / Focus 独立 / Aim 只转朝向 / 幂等 | 11/11 |
-| save_reload_test | 真实 .blend save + reload 逐帧矩阵一致 | 2/2 |
-| bake_test | Live ≈ Baked 每帧 + Quaternion | 3/3 |
-| viewport_render_test | Viewport ≈ Render + scene.camera 切换 | 2/2 |
-| offset_pan_test | Offset 沿 Right/Up/Forward + pan/tilt/roll 绕本地轴 | 9/9 |
-
-> 已知 headless 限制：后台模式下直接改 Python 属性不会自动触发 Driver 重求值
-> （Blender issue #91140），测试里统一走 `rig.force_update()`（内部 `update_tag()`）。
-
-## 硬性工程规则（Codex 开发约束）
-
-1. Camera 最终结果只能有一个 Source of Truth。
-2. Dependency Graph 是实时求值核心。
-3. Viewport / Render / Bake 共用同一个 evaluated Camera result。
-4. Focus System 与 Transform System 完全解耦。
-5. 禁止 Focus Target 修改或初始化 Camera Transform。
-6. 禁止 File Load 正常状态下重新初始化 Camera。
-7. 禁止 Incremental Transform（`camera.location += offset`）。
-8. 所有实时计算必须满足 Idempotent。
-9. Local / World Space 必须显式定义。
-10. Axis 转换必须集中在统一 Utility。
-11. Preserve Pose 必须 Matrix 验证（位置 ≤ 1e-5 unit，旋转 ≤ 1e-5 rad）。
-12. Bake 必须读取 evaluated Camera Matrix。
-13. Camera Rename / Target Rename 不能破坏关系（名字不是身份）。
-14. Pointer / Constraint Target 优先于 Name String。
-15. Render 不允许重新计算另一套 Camera。
-16. 任何失败优先保护用户已调好的 Camera。
-17. Realtime Wrong / Bake Correct 仍属于严重 Bug。
-18. Save / Reload Matrix Regression Test 是 P0。
-19. Focus Save / Reload Regression Test 是永久测试。
-20. V1 不通过一致性测试，不进入 V1.1。
-
-完整规范见：`docs/Cine_Controller_稳定性与统一求值规范.md`
-
-## 开发规范（简记）
-
-- 求值顺序：Origin → Horizontal → Vertical → Distance → Base → Offset → Aim → Pan/Tilt/Roll → FINAL。
-- Axis 约定：Blender 世界 `Z=Up`；Camera 本地 `-Z=Forward`、`+Y=Up`、`+X=Right`。符号映射只在 `axis_utils.py`。
-- Preserve Pose 是 Enable / Set Origin / Repair / Remove 的统一底层。
-- 所有 Helper 身份靠 PointerProperty 记录，**不靠对象名字符串**重查。
+相关原生功能参考：[Blender 相机与 Dolly Zoom](https://docs.blender.org/manual/en/5.3/render/cameras.html)、[Camera 构图与光学属性](https://docs.blender.org/api/5.3/bpy.types.Camera.html)。
