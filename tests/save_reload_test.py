@@ -1,4 +1,4 @@
-"""P0 Save/Reload 回归测试（规范 §44/45）—— 真实 .blend 保存与重开。
+"""P0 Save/Reload 回归测试—— 真实 .blend 保存与重开。
 
 流程：
     创建场景 → Enable Controller → 多帧记录 Matrix → Save .blend

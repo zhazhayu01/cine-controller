@@ -7,6 +7,14 @@ if (-not (Test-Path -LiteralPath $Blender)) {
     throw "找不到 Blender，请通过 -Blender 指定 blender.exe 的完整路径。"
 }
 $testNames = @(
+    'shake_ui_and_api_test',
+    'shake_test',
+    'camera_view_test',
+    'dolly_distance_test',
+    'icons_and_help_test',
+    'automation_test',
+    'path_follow_test',
+    'pose_import_test',
     'position_import_test',
     'preferences_test',
     'cinematography_test', 'cinematography_panel_test',

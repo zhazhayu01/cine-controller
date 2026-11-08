@@ -1,4 +1,4 @@
-"""P0 Offset / Pan / Tilt / Roll 专项测试（规范 §61/62/63）。
+"""P0 Offset / Pan / Tilt / Roll 专项测试。
 
 验证第二阶段的完整参数：
     - Offset 沿 Camera Right/Up/Forward 正确移动

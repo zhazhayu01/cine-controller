@@ -1,6 +1,6 @@
-"""P0 Bake 一致性测试（规范 §42）—— Live Matrix ≈ Baked Matrix 每帧成立。
+"""P0 Bake 一致性测试—— Live Matrix ≈ Baked Matrix 每帧成立。
 
-Bake 的唯一数据来源是 evaluated Camera Matrix（§40），禁止独立重算。
+Bake 的唯一数据来源是 evaluated Camera Matrix，禁止独立重算。
 """
 import sys
 import os
@@ -107,7 +107,7 @@ results.append(report(
     f"(max_pos_err={max_err:.2e})"
 ))
 
-# 验证 Bake 后旋转模式是 QUATERNION（§43）
+# 验证 Bake 后旋转模式是 QUATERNION
 results.append(report(
     "B2. Bake 使用 Quaternion 旋转模式",
     camera.rotation_mode == 'QUATERNION',

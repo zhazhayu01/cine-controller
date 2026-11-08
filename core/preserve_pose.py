@@ -1,8 +1,7 @@
-"""Preserve Pose —— 整个插件的基础算法（规范 §30 / §31）。
+"""Preserve Pose —— 整个插件的基础算法。
 
 统一底层，适用：
-    Enable Controller / Set Origin / Change Origin Mode / Repair Rig /
-    Remove Controller / Rebind Aim / Future Rig Upgrade
+    控制器结构修改、原点调整与解除绑定
 
 统一逻辑：
     1. 获取 Current Evaluated Camera World Matrix

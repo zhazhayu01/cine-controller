@@ -1,11 +1,11 @@
-"""P0 Target 生命周期测试（规范 §24-28）。
+"""P0 Target 生命周期测试。
 
 验证：
-    §24  Rename 不破坏关系（名字不是身份）
-    §26  Focus Target 删除 → Transform 完全不变
-    §27  Aim Target 删除 → 不崩 + 位置/旋转不变
-    §28  Origin Target 删除 → camera 不跳
-    §61  Origin 改绑 → 位姿不跳 + 约束 target 更新
+    Rename 不破坏关系（名字不是身份）
+    Focus Target 删除 → Transform 完全不变
+    Aim Target 删除 → 不崩 + 位置/旋转不变
+    Origin Target 删除 → camera 不跳
+    Origin 改绑 → 位姿不跳 + 约束 target 更新
 """
 import sys
 import os
@@ -57,7 +57,7 @@ def setup_scene():
 
 
 # ---------------------------------------------------------------------------
-# §26 Focus Target 删除
+# Focus Target 删除
 # ---------------------------------------------------------------------------
 camera, origin, aim, focus = setup_scene()
 M0 = camera.matrix_world.copy()
@@ -68,20 +68,20 @@ results.append(report("F1. Focus 删除 Transform 不变", preserve_pose.matrix_
 results.append(report("F2. Focus 删除后指针为 None", camera.cine.focus_target is None))
 
 # ---------------------------------------------------------------------------
-# §27 Aim Target 删除
+# Aim Target 删除
 # ---------------------------------------------------------------------------
 camera, origin, aim, focus = setup_scene()
 M0 = camera.matrix_world.copy()
 bpy.data.objects.remove(aim, do_unlink=True)
 rig.force_update(bpy.context, camera)
 M1 = camera.matrix_world.copy()
-# 位置不变是硬要求；旋转会随 aim 移除而变（aim 本就控制朝向，§27 允许）
+# 位置不变是硬要求；旋转会随 aim 移除而变
 pos_unchanged = (M0.to_translation() - M1.to_translation()).length < 1e-5
 results.append(report("A1. Aim 删除位置不变", pos_unchanged))
 results.append(report("A2. Aim 删除后指针为 None", camera.cine.aim_target is None))
 
 # ---------------------------------------------------------------------------
-# §28 Origin Target 删除
+# Origin Target 删除
 # ---------------------------------------------------------------------------
 camera, origin, aim, focus = setup_scene()
 M0 = camera.matrix_world.copy()
@@ -100,7 +100,7 @@ except Exception as e:
     results.append(report("O3. Origin 删除后改参数不崩", False, f"({e})"))
 
 # ---------------------------------------------------------------------------
-# §61 Origin 改绑
+# Origin 改绑
 # ---------------------------------------------------------------------------
 camera, origin, aim, focus = setup_scene()
 bpy.ops.object.empty_add(type='PLAIN_AXES', location=(5.0, 5.0, 0.0))
@@ -128,7 +128,7 @@ results.append(report(
 ))
 
 # ---------------------------------------------------------------------------
-# §24 Rename 不破坏关系
+# Rename 不破坏关系
 # ---------------------------------------------------------------------------
 camera, origin, aim, focus = setup_scene()
 M0 = camera.matrix_world.copy()

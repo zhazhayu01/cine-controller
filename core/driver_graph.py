@@ -6,7 +6,7 @@
 import re
 
 PREFIX = '_cine2_'
-FUNCTIONS = {'sin', 'cos', 'sqrt', 'max', 'min', 'acos', 'abs', 'if', 'else', 'and'}
+FUNCTIONS = {'sin', 'cos', 'sqrt', 'max', 'min', 'acos', 'abs', 'pow', 'if', 'else', 'and', 'frame'}
 
 
 class DriverGraph:

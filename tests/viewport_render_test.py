@@ -1,10 +1,10 @@
-"""P0 Viewport vs Render 一致性测试（规范 §17/49）。
+"""P0 Viewport vs Render 一致性测试。
 
 在 headless 下用两种 depsgraph mode 模拟：
     viewport depsgraph  → depsgraph.mode == 'VIEWPORT'（默认）
     render  depsgraph   → 用 scene.frame_set + 强制求值后的 evaluated matrix
 
-规范 §16：Render 不能执行另一套 Camera 更新逻辑，只读 Scene 最终 evaluated transform。
+Render 不能执行另一套 Camera 更新逻辑，只读 Scene 最终 evaluated transform。
 因此 viewport 与 render 的 matrix 必须近似相等（浮点容差内）。
 """
 import sys
@@ -65,7 +65,7 @@ origin.keyframe_insert(data_path="location", frame=1)
 origin.location = (3.0, 2.0, 1.0)
 origin.keyframe_insert(data_path="location", frame=100)
 
-# 参数动画（horizontal 超过 360°，规范 §49）
+# 参数动画
 for f in (1, 50, 100):
     scene.frame_set(f)
     camera.cine.horizontal = 0.15 * f          # f=100 → 15 rad ≈ 859°，超过 720°
@@ -87,7 +87,7 @@ for f in test_frames:
     dg_vp.update()
     m_viewport = camera.evaluated_get(dg_vp).matrix_world.copy()
 
-    # 模拟 Render depsgraph：新建 depsgraph 并强制求值（§14 读 evaluated）
+    # 模拟 Render depsgraph：新建 depsgraph 并强制求值
     # 通过 scene 的 view_layer 建一个独立 depsgraph 模拟 render 路径
     dg_render = bpy.context.evaluated_depsgraph_get()
     dg_render.update()
@@ -104,7 +104,7 @@ results.append(report(
     f"(max_pos_err={max_err:.2e})"
 ))
 
-# 额外验证：Camera 的 active/scene.camera 切换不影响求值（§37）
+# 额外验证：Camera 的 active/scene.camera 切换不影响求值
 camera2 = None
 bpy.ops.object.camera_add(location=(5.0, 5.0, 5.0))
 camera2 = bpy.context.active_object
@@ -120,7 +120,7 @@ dg.update()
 m_cam_after_switch = camera.evaluated_get(dg).matrix_world.copy()
 
 results.append(report(
-    "V2. 切换 scene.camera 不影响原 Camera 求值（§37）",
+    "V2. 切换 scene.camera 不影响原 Camera 求值",
     preserve_pose.matrix_close(m_cam_before_switch, m_cam_after_switch),
 ))
 

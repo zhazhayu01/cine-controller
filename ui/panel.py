@@ -1,15 +1,20 @@
 """常驻紧凑侧栏：图标操作、数值输入与原生悬停提示。"""
 import bpy
 
-from ..core import rig, dolly_zoom
+from ..core import rig, dolly_zoom, path_follow
 from ..preferences import get_preferences, GUIDES
+from . import icons
+from .help import INFO
 
 
 def _prop(layout, data, path, icon, name, labels=False):
     # 数值控件不直接传 icon，避免 Blender 把无文字数值框挤成仅图标按钮。
     row = layout.row(align=True)
-    row.label(text='', icon=icon)
-    row.prop(data, path, text=name if labels else '')
+    title, drawing, detail = INFO[path]
+    button = row.operator('cine.parameter_info', text='', emboss=False, **icons.kwargs(drawing, icon))
+    button.help_text = title+'\n'+detail
+    options = {'placeholder': '选择'+title} if data.bl_rna.properties[path].type == 'POINTER' else {}
+    row.prop(data, path, text=name if labels else '', **options)
 
 
 class CINE_PT_panel(bpy.types.Panel):
@@ -30,8 +35,8 @@ class CINE_PT_panel(bpy.types.Panel):
         labels = prefs.show_labels if prefs is not None else False
         camera = rig.resolve_camera(context)
         row = layout.row(align=True)
-        row.operator('cine.create_camera', text='', icon='ADD')
-        row.operator('cine.camera_view', text='', icon='VIEW_CAMERA')
+        row.operator('cine.create_camera', text='', **icons.kwargs('create', 'ADD'))
+        row.operator('cine.camera_view', text='', **icons.kwargs('camera', 'VIEW_CAMERA'))
         row.operator('cine.set_render_camera', text='', icon='RENDER_STILL')
         row.operator('cine.keyframe_camera', text='', icon='KEY_HLT')
         row.operator('cine.open_preferences', text='', icon='PREFERENCES')
@@ -41,7 +46,7 @@ class CINE_PT_panel(bpy.types.Panel):
         if camera is not None and direct:
             layout.label(text=camera.name, icon='CAMERA_DATA')
         else:
-            layout.prop(context.scene, 'cine_camera', text='', icon='CAMERA_DATA')
+            layout.prop(context.scene, 'cine_camera', text='', placeholder='选择摄像机', **icons.kwargs('camera', 'CAMERA_DATA'))
         if camera is None:
             return
         params = camera.cine
@@ -61,18 +66,24 @@ class CINE_PT_panel(bpy.types.Panel):
         reset = row.row(align=True)
         reset.enabled = not dolly
         reset.operator('cine.reset_space_axes', text='', icon='FILE_REFRESH')
-        if params.controller is not None:
-            row.operator('cine.toggle_dolly_zoom', text='', icon='CAMERA_STEREO', depress=dolly)
 
         row = layout.row(align=True)
         row.enabled = not dolly
         _prop(row, params, 'position_source', 'CAMERA_DATA', '参考相机', labels)
-        row.operator('cine.import_camera_position', text='', icon='IMPORT')
+        row.operator('cine.import_camera_position', text='', **icons.kwargs('import_pose', 'IMPORT'))
 
         motion = layout.column(align=True)
         motion.enabled = not dolly
         _prop(motion, params, 'origin', 'OBJECT_ORIGIN', '原点', labels)
-        _prop(motion, params, 'distance', 'DRIVER_DISTANCE', '距离', labels)
+        if dolly and dolly_zoom.has_distance_control(camera):
+            _prop(layout, params.controller.cine, 'dolly_distance', 'DRIVER_DISTANCE', '距离', labels)
+            layout.label(text='希区柯克：距离与焦距联动', icon='LINKED')
+        else:
+            _prop(motion, params, 'distance', 'DRIVER_DISTANCE', '距离', labels)
+            if dolly:
+                layout.label(text='请关闭再开启希区柯克以更新距离联动', icon='INFO')
+        motion = layout.column(align=True)
+        motion.enabled = not dolly
         row = motion.row(align=True)
         _prop(row, params, 'horizontal', 'ORIENTATION_GLOBAL', '水平', labels)
         _prop(row, params, 'vertical', 'ORIENTATION_NORMAL', '垂直', labels)
@@ -83,9 +94,6 @@ class CINE_PT_panel(bpy.types.Panel):
         _prop(row, params, 'pan', 'ORIENTATION_VIEW', '摇摄', labels)
         _prop(row, params, 'tilt', 'CON_ROTLIKE', '俯仰', labels)
         _prop(row, params, 'roll', 'DRIVER_ROTATIONAL_DIFFERENCE', '翻滚', labels)
-        _prop(motion, params, 'aim_target', 'CON_TRACKTO', '瞄准', labels)
-        if params.aim_target is not None:
-            _prop(motion, params, 'aim_influence', 'IPO_LINEAR', '权重', labels)
 
         row = layout.row()
         row.enabled = not dolly
@@ -104,16 +112,43 @@ class CINE_PT_panel(bpy.types.Panel):
         row = layout.row(align=True)
         for field, icon in (('show_composition_thirds', 'GRID'), ('show_composition_center', 'PIVOT_CURSOR'),
                             ('show_safe_areas', 'SHADING_BBOX'), ('show_passepartout', 'MOD_MASK')):
-            row.prop(camera.data, field, text='', icon=icon, toggle=True)
-        if params.controller is not None:
-            row = layout.row()
-            row.enabled = not dolly
-            _prop(row, params.controller.cine, 'dolly_target', 'CAMERA_STEREO', '希区柯克主体', labels)
-        if dolly:
-            _prop(layout, params.controller.cine, 'dolly_travel', 'DRIVER_DISTANCE', '推拉', labels)
-            storage = params.controller.cine.dolly_graph
-            if storage and storage.get('_cine2_depth', 1) <= 0:
-                layout.label(text='主体在镜头后方', icon='ERROR')
+            button = row.operator('cine.toggle_guide', text='', depress=getattr(camera.data, field),
+                                  **icons.kwargs(INFO[field][1], icon))
+            button.field = field
+
+
+class CINE_PT_path(bpy.types.Panel):
+    bl_label = '样条轨迹'
+    bl_idname = 'CINE_PT_path'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Cine'
+    bl_parent_id = 'CINE_PT_panel'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        camera = rig.resolve_camera(context)
+        return camera is not None and camera.cine.enabled and camera.cine.controller is not None
+
+    def draw(self, context):
+        camera = rig.resolve_camera(context)
+        layout = self.layout
+        prefs = get_preferences(context)
+        labels = prefs.show_labels if prefs else False
+        constraint = path_follow.get_constraint(camera.cine.controller)
+        if constraint is None or constraint.mute or constraint.target is None:
+            row = layout.row(align=True)
+            _prop(row, camera.cine, 'path_target', 'CURVE_DATA', '轨迹', labels)
+            row.operator('cine.bind_path', text='', **icons.kwargs('path_bind', 'LINKED'))
+        if constraint is not None:
+            row = layout.row(align=True)
+            row.label(text=constraint.target.name if constraint.target else '轨迹已删除', icon='CURVE_DATA')
+            row.operator('cine.toggle_path', text='', icon='PLAY' if constraint.mute else 'PAUSE')
+            controls = layout.column(align=True)
+            controls.enabled = not constraint.mute and constraint.target is not None
+            _prop(controls, constraint, 'offset_factor', 'DRIVER_DISTANCE', '进度', labels)
+            _prop(controls, constraint, 'use_curve_follow', 'ORIENTATION_VIEW', '跟随朝向', labels)
 
 
 class CINE_PT_camera_settings(bpy.types.Panel):
@@ -137,17 +172,17 @@ class CINE_PT_camera_settings(bpy.types.Panel):
         optical.enabled = not dolly_zoom.is_enabled(camera)
         for field, name in (('type', '投影'), ('sensor_fit', '传感器适配'),
                             ('sensor_width', '传感器宽度'), ('sensor_height', '传感器高度')):
-            optical.prop(data, field, text=name)
+            _prop(optical, data, field, 'CAMERA_DATA', name, True)
         for field, name in (('clip_start', '近裁剪'), ('clip_end', '远裁剪'),
                             ('shift_x', '水平偏移'), ('shift_y', '垂直偏移')):
-            layout.prop(data, field, text=name)
+            _prop(layout, data, field, 'CAMERA_DATA', name, True)
         layout.operator('cine.reset_lens_shift', text='', icon='LOOP_BACK')
         for field, name in GUIDES:
-            layout.prop(data, field, text=name)
-        layout.prop(data, 'passepartout_alpha', text='遮罩不透明度')
+            _prop(layout, data, field, 'CAMERA_DATA', name, True)
+        _prop(layout, data, 'passepartout_alpha', 'MOD_MASK', '遮罩不透明度', True)
 
 
-CLASSES = (CINE_PT_panel, CINE_PT_camera_settings)
+CLASSES = (CINE_PT_panel, CINE_PT_path, CINE_PT_camera_settings)
 
 
 def register():

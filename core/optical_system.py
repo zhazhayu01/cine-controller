@@ -3,7 +3,7 @@
 参数：
     Lens / Sensor / Shift / DOF / Focus Target / Focus Distance / F-Stop
 
-规则（规范 §6 / §7 / §8）：
+规则：
     - 只能写 camera.data 相关属性。
     - Focus Target 严格与 Camera Transform 解耦。
     - Focus Target 变化绝不得触发 rig rebuild / preserve_pose / set_origin。
@@ -14,7 +14,7 @@ from mathutils import Vector
 def apply_focus_to_camera(camera_obj, focus_target=None, focus_distance=None, f_stop=None) -> None:
     """把 Focus 相关参数写入 Camera Data DOF。
 
-    Focus Target 直接绑定到 camera.data.dof.focus_object（规范 §7），
+    Focus Target 直接绑定到 camera.data.dof.focus_object，
     绝不经过 Helper Transform / Camera Transform。
     """
     if camera_obj is None or camera_obj.data is None:

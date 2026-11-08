@@ -1,11 +1,11 @@
-"""Bake Operator（规范 §40-43）。
+"""Bake Operator。
 
 Bake 的职责：采样当前真实 evaluated Camera Matrix，Bake 成普通 Camera 关键帧。
 
 正确流程：
     1. 逐帧采样 evaluated matrix_world（此时 rig 还在，读的是真实结果）
     2. 移除 rig（解除 Controller，Camera 恢复普通相机）
-    3. 把采样结果写成 location + rotation_quaternion 关键帧（§43）
+    3. 把采样结果写成 location + rotation_quaternion 关键帧
 
 绝不重新用 Distance/Horizontal/Vertical 独立推算位置。
 """
@@ -36,7 +36,7 @@ class CINE_OT_bake(bpy.types.Operator):
         cur = scene.frame_current
         bake_lens = dolly_zoom.is_enabled(camera)
 
-        # 1. 采样：逐帧读 evaluated matrix_world（真实结果，§40）
+        # 1. 采样：逐帧读 evaluated matrix_world
         samples = {}
         lenses = {}
         for frame in range(start, end + 1):
@@ -50,7 +50,7 @@ class CINE_OT_bake(bpy.types.Operator):
         # 2. 移除 rig（解除 Controller）
         rig.remove_rig(context, camera)
 
-        # 3. 写关键帧（QUATERNION，§43）
+        # 3. 写关键帧
         camera.rotation_mode = 'QUATERNION'
         for frame in range(start, end + 1):
             M = samples[frame]

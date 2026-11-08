@@ -48,6 +48,7 @@ class CINE_Preferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator('cine.copy_mcp_instructions', text='复制 MCP 接入指令', icon='COPYDOWN')
         layout.prop(self, 'show_labels')
         box = layout.box()
         box.label(text='新建镜头默认值', icon='ADD')

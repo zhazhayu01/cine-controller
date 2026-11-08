@@ -1,7 +1,7 @@
 # Cine Controller for Blender
 # 电影级摄影机控制器插件入口
 #
-# 架构原则（详见 docs/ 规范）：
+# 架构原则（详见 docs/内部控制器架构.md）：
 #   - Single Source of Truth：Viewport / Render / Bake 读取同一个 evaluated Camera Transform
 #   - 三个独立系统域：Transform / Orientation / Optical
 #   - 禁止 Incremental Transform，所有求值必须幂等
@@ -10,10 +10,10 @@
 bl_info = {
     "name": "Cine Controller",
     "author": "zhazhayu001",
-    "version": (0, 6, 0),
+    "version": (1, 0, 0),
     "blender": (5, 2, 0),
-    "location": "View3D > Sidebar > Cine",
-    "description": "电影级摄影机控制器：空间原点、瞄准和对焦控制与一致性求值",
+    "location": "3D 视图 > 侧栏 > Cine",
+    "description": "摄像机空间运镜、轨迹、光学与程序化效果控制",
     "category": "Camera",
 }
 
@@ -27,6 +27,7 @@ _MODULES = (
     "preferences",
     "operators",
     "ui",
+    "automation",
 )
 
 _submodules = {
@@ -38,10 +39,12 @@ _submodules = {
         "optical_system",
         "dolly_zoom",
         "rig",
+        "shake",
+        "path_follow",
         "preserve_pose",
     ),
-    "operators": ("create", "enable", "disable", "bake", "cinematography"),
-    "ui": ("panel",),
+    "operators": ("create", "enable", "disable", "bake", "cinematography", "path", "shake"),
+    "ui": ("icons", "help", "panel", "effects"),
 }
 
 
@@ -65,9 +68,9 @@ def register():
 
     _reload()
 
-    from . import utils, core, preferences, operators, ui
+    from . import utils, core, preferences, operators, ui, automation
 
-    for mod in (utils, core, preferences, operators, ui):
+    for mod in (utils, core, preferences, operators, ui, automation):
         if hasattr(mod, "register"):
             mod.register()
 
@@ -75,9 +78,9 @@ def register():
 def unregister():
     import bpy
 
-    from . import utils, core, preferences, operators, ui
+    from . import utils, core, preferences, operators, ui, automation
 
-    for mod in reversed((utils, core, preferences, operators, ui)):
+    for mod in reversed((utils, core, preferences, operators, ui, automation)):
         if hasattr(mod, "unregister"):
             mod.unregister()
 

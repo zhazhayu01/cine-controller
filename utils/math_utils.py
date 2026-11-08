@@ -56,30 +56,14 @@ def extract_camera_pose(matrix: Matrix) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Orbit 求解 —— 与 rig 层级严格一致
-#
-# rig 层级（详见 core/rig.py）：
-#     ROOT (世界位置 = Origin)
-#       └─ YAW   (绕本地 Z = horizontal)
-#           └─ PITCH (绕本地 X = vertical)
-#               └─ BASE  (固定 rot.x = -90°，把相机 forward 从 -Z 转到水平)
-#                   └─ DIST  (本地 +Z = distance，拉远)
-#                       └─ CAMERA (真实相机)
-#
-# 因此 Camera 相对 Origin 的位置向量为：
-#     rel = R_yaw(h) · R_pitch(v) · R_x(-90°) · (0, 0, d)
-#         = ( -d·sin h·cos v,  d·cos h·cos v,  d·sin v )
-#
-# vertical = 0 → 水平环绕（Elevation 0 = 水平）
-# vertical = +π/2 → 正上方俯视
-# ---------------------------------------------------------------------------
+# 轨道位置与当前内部空间图一致：水平绕 Z、垂直绕 X，基准绕 X 校正 +90°。
+# 相对位置为 (d*sin(h)*cos(v), -d*cos(h)*cos(v), -d*sin(v))。
 
 
 def compose_orbit_matrix(origin: Vector, distance: float, horizontal: float, vertical: float) -> Vector:
     """根据 Orbit 参数绝对求解 Camera 世界位置（幂等，与 rig 层级一致）。
 
-    与 compose_aim_world_matrix 的 translation 严格一致：
+    当前轨道位置公式：
         R_z(h) · R_x(v) · R_x(90°) · (0,0,d)
         = ( d·sin h·cos v,  -d·cos h·cos v,  -d·sin v )
     """
@@ -96,7 +80,7 @@ def compose_orbit_matrix(origin: Vector, distance: float, horizontal: float, ver
 def solve_orbit_from_pose(origin: Vector, camera_world_pos: Vector) -> tuple[float, float, float]:
     """从 Camera 世界位置反解 (distance, horizontal, vertical)。
 
-    与 compose_orbit_matrix 互为逆，用于 Enable / Set Origin 时反解参数。
+    与 compose_orbit_matrix 互为逆，用于显式机位导入和空间原点调整。
     """
     d = Vector(camera_world_pos) - Vector(origin)
     distance = d.length

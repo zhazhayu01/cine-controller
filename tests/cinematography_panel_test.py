@@ -61,6 +61,20 @@ assert abs(camera.data.lens-before_lens) < 1e-4
 assert max(abs(before[i][j]-camera.matrix_world[i][j]) for i in range(4) for j in range(4)) < 2e-5
 draw()
 bpy.ops.cine.toggle_dolly_zoom()
+data = bpy.data.curves.new('轨迹数据', 'CURVE')
+data.dimensions = '3D'
+spline = data.splines.new('POLY')
+spline.points.add(1)
+spline.points[1].co = (0, 4, 0, 1)
+trajectory = bpy.data.objects.new('轨迹', data)
+bpy.context.collection.objects.link(trajectory)
+camera.cine.path_target = trajectory
+assert bpy.ops.cine.bind_path() == {'FINISHED'}
+draw()
+assert bpy.ops.cine.toggle_path() == {'FINISHED'}
+draw()
+assert bpy.ops.cine.toggle_path() == {'FINISHED'}
+draw()
 bpy.ops.mesh.primitive_cube_add()
 draw()
 assert rig.resolve_camera(bpy.context) == camera

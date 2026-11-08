@@ -43,13 +43,13 @@ for index in range(40):
     rig.force_update(bpy.context, camera)
     before = source.matrix_world.copy()
     expected = source.evaluated_get(bpy.context.evaluated_depsgraph_get()).matrix_world.translation.copy()
-    assert bpy.ops.cine.import_camera_position() == {'FINISHED'}
+    rig.import_camera_position(bpy.context, camera, source)
     actual = rig.read_evaluated_camera_matrix(bpy.context, camera).translation
     assert (actual - expected).length < 3e-5, (index, actual, expected)
     assert tuple(camera.cine.offset) == (0, 0, 0)
     assert (camera.cine.pan, camera.cine.tilt, camera.cine.roll) == angles
     assert source.matrix_world == before, '不能修改参考相机'
-print('[PASS] 40 组机位反推：控制器平移旋转、非均匀缩放、外部原点及参考相机父级；朝向参数保留')
+print('[PASS] 40 组位置反推底层兼容：控制器变换、非均匀缩放、外部原点及参考相机父级')
 
 control.matrix_world = Matrix.Identity(4)
 source.parent = None

@@ -7,7 +7,7 @@ import bpy
 from mathutils import Matrix, Vector, Quaternion
 
 from .driver_graph import PREFIX, build_graph
-from ..utils.math_utils import solve_orbit_from_pose
+from ..utils.math_utils import solve_orbit_from_pose, quaternion_angle_difference
 from ..utils.axis_utils import default_camera_rotation
 
 LEGACY_HELPERS = ('rig_root', 'rig_yaw', 'rig_pitch', 'rig_dist', 'rig_base',
@@ -186,8 +186,9 @@ def needs_independent_graph(camera):
     if storage is None:
         return False
     curve = storage.animation_data.drivers.find('["_cine2_orb0"]')
-    from . import dolly_zoom
-    return storage.users > 1 or any(v.targets[0].id != camera for v in curve.driver.variables) or dolly_zoom.needs_independent(camera)
+    from . import dolly_zoom, shake
+    return (storage.users > 1 or any(v.targets[0].id != camera for v in curve.driver.variables)
+            or dolly_zoom.needs_independent(camera) or shake.needs_independent(camera))
 
 
 def make_independent(context, camera):
@@ -212,6 +213,8 @@ def make_independent(context, camera):
     _retarget_inputs(camera)
     from . import dolly_zoom
     dolly_zoom.ensure_owned(camera)
+    from . import shake
+    shake.ensure_owned(context, camera)
     force_update(context, camera)
 
 
@@ -223,6 +226,8 @@ def _clear_graph(camera):
             if curve.data_path in {'location', 'rotation_quaternion', 'scale',
                                    'delta_location', 'delta_rotation_quaternion'}:
                 camera.driver_remove(curve.data_path, curve.array_index)
+    from . import shake
+    shake.clear(camera)
     storage = camera.cine.internal_graph
     camera.cine.internal_graph = None
     if storage is not None and storage.users == 0:
@@ -336,10 +341,12 @@ def reset_space_axes(context, camera):
     force_update(context, camera)
 
 
-def import_camera_position(context, camera, source):
-    """从参考相机当前帧的最终位置反推轨道参数，不改变参考相机。"""
+def import_camera_position(context, camera, source, full_pose=False):
+    """采样参考相机；完整模式额外反推局部旋转，并关闭瞄准影响。"""
     from . import dolly_zoom
     params = camera.cine
+    if params.shake_enabled:
+        raise ValueError('请先停用震动，再反推基础机位')
     if not params.enabled or params.rig_root is not None or params.internal_graph is None:
         raise ValueError('请先启用或升级当前镜头的内部控制器')
     if source is None or source == camera or source.type != 'CAMERA':
@@ -347,6 +354,8 @@ def import_camera_position(context, camera, source):
     if dolly_zoom.is_enabled(camera):
         raise ValueError('请先停用希区柯克工具，再导入普通机位')
     fields = ('distance', 'horizontal', 'vertical', 'offset')
+    if full_pose:
+        fields += ('pan', 'tilt', 'roll', 'aim_influence')
     paths = {'cine.' + field for field in fields}
     animation = camera.animation_data
     if animation is not None:
@@ -355,32 +364,58 @@ def import_camera_position(context, camera, source):
             for strip in track.strips:
                 curves.extend(_action_curves(strip.action))
         if any(curve.data_path in paths for curve in curves):
-            raise ValueError('距离、环绕或偏移已有动画/驱动，请先整理这些通道再导入机位')
+            raise ValueError('待反推参数已有动画/驱动，请先整理这些通道再导入机位')
     context.view_layer.update()
     depsgraph = context.evaluated_depsgraph_get()
-    world_position = source.evaluated_get(depsgraph).matrix_world.translation.copy()
+    source_matrix = source.evaluated_get(depsgraph).matrix_world.copy()
+    world_position = source_matrix.translation
     controller = params.controller
     inverse = Matrix.Identity(4)
     if controller is not None:
         matrix = controller.evaluated_get(depsgraph).matrix_world
         if abs(matrix.to_3x3().determinant()) <= 1e-12:
             raise ValueError('控制器缩放为零或接近零，无法反推相对位置')
+        if full_pose:
+            # 非均匀缩放、镜像或剪切会扭曲相机坐标轴，无法用纯旋转可靠复现。
+            axes = [matrix.col[i].to_3d() for i in range(3)]
+            lengths = [axis.length for axis in axes]
+            if (matrix.to_3x3().determinant() < 0
+                    or max(lengths) - min(lengths) > 1e-5 * max(lengths)
+                    or any(abs(axes[i].normalized().dot(axes[j].normalized())) > 1e-5
+                           for i, j in ((0, 1), (0, 2), (1, 2)))):
+                raise ValueError('完整反推需要控制器使用正向等比缩放且无剪切，请先整理控制器或其父级的缩放')
         inverse = matrix.inverted()
     position = inverse @ world_position
     origin = (inverse @ params.origin.evaluated_get(depsgraph).matrix_world.translation
               if params.origin is not None else Vector(params.origin_fallback))
     values = solve_orbit_from_pose(origin, position)
+    local_angles = None
+    if full_pose:
+        reference_rotation = source_matrix.to_quaternion().normalized()
+        control_rotation = inverse.inverted().to_quaternion().normalized()
+        desired = control_rotation.inverted() @ reference_rotation
+        base = compose_orbit_rotation(values[1], values[2]).to_quaternion() @ Quaternion(params.base_rotation)
+        local = base.inverted() @ desired
+        # 欧拉兼容参数优先选择接近原数值的等价解；翻滚使用插件的负 Z 约定。
+        from mathutils import Euler
+        local_angles = local.to_euler('XYZ', Euler((params.tilt, params.pan, -params.roll), 'XYZ'))
     make_independent(context, camera)
-    saved = (params.distance, params.horizontal, params.vertical, tuple(params.offset))
+    saved = {field: tuple(params.offset) if field == 'offset' else getattr(params, field) for field in fields}
     try:
         params.distance, params.horizontal, params.vertical = values
         params.offset = (0, 0, 0)
+        if full_pose:
+            params.tilt, params.pan, params.roll = local_angles.x, local_angles.y, -local_angles.z
+            params.aim_influence = 0
         force_update(context, camera)
-        actual = read_evaluated_camera_matrix(context, camera).translation
-        if (actual - world_position).length > 1e-4 * max(1, (world_position - inverse.inverted().translation).length):
+        actual_matrix = read_evaluated_camera_matrix(context, camera)
+        if (actual_matrix.translation - world_position).length > 1e-4 * max(1, (world_position - inverse.inverted().translation).length):
             raise ValueError('反推位置与参考相机不一致，已恢复原参数')
+        if full_pose and quaternion_angle_difference(actual_matrix.to_quaternion(), reference_rotation) > 1e-4:
+            raise ValueError('反推朝向与参考相机不一致，已恢复原参数')
     except Exception:
-        params.distance, params.horizontal, params.vertical, params.offset = saved
+        for field, value in saved.items():
+            setattr(params, field, value)
         force_update(context, camera)
         raise
     return values

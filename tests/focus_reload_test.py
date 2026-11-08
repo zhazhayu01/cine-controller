@@ -1,4 +1,4 @@
-"""P0 Focus Save/Reload 永久回归测试（规范 §46）。
+"""P0 Focus Save/Reload 永久回归测试。
 
 这是针对「Camera 插件已知类型 bug」的专项测试，必须长期保留：
     Camera + Origin + Focus Target → Enable → Bind Focus → Save → Reload

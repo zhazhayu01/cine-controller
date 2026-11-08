@@ -74,8 +74,9 @@ assert any(data == camera.data and path == 'sensor_width' for data, path, _kw in
 assert any(data == camera.data and path == 'show_composition_golden' for data, path, _kw in Layout.fields)
 Layout.fields.clear()
 CINE_PT_panel.draw(SimpleNamespace(layout=Layout()), bpy.context)
-for field in ('focus_object', 'focus_distance', 'dolly_target'):
+for field in ('focus_object', 'focus_distance'):
     assert any(path == field for _data, path, _kw in Layout.fields), field
+assert not any(path == 'dolly_target' for _data, path, _kw in Layout.fields), '低频希区柯克设置必须放入高级面板'
 original.data.dof.focus_distance = 17
 camera.data.dof.focus_distance = 4
 assert original.data.dof.focus_distance == 17, '逐镜头对焦参数不能相互覆盖'
